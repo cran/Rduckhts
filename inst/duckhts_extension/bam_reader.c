@@ -210,6 +210,7 @@ enum {
 
 typedef struct {
     char *file_path;
+    char *index_path;
     char *reference;
 
     /* Parsed from the "region" named parameter.
@@ -277,6 +278,7 @@ static void destroy_bam_bind(void *data) {
     bam_bind_data_t *b = (bam_bind_data_t *)data;
     if (!b) return;
     if (b->file_path) duckdb_free(b->file_path);
+    if (b->index_path) duckdb_free(b->index_path);
     if (b->reference) duckdb_free(b->reference);
     if (b->region) duckdb_free(b->region);
     if (b->regions) {
@@ -345,13 +347,22 @@ static void parse_regions(const char *region_str, char ***out_regions, unsigned 
  * Ensure reusable buffers are large enough
  * ================================================================ */
 
-static void ensure_seq_buf(bam_local_init_data_t *l, int seq_len) {
+static int ensure_seq_buf(bam_local_init_data_t *l, int seq_len) {
     size_t need = (size_t)(seq_len + 1);
     if (need > l->seq_buf_cap) {
-        l->seq_buf_cap = need * 2;
-        l->seq_buf = (char *)realloc(l->seq_buf, l->seq_buf_cap);
-        l->qual_buf = (char *)realloc(l->qual_buf, l->seq_buf_cap);
+        size_t new_cap = need * 2;
+        char *new_seq = (char *)realloc(l->seq_buf, new_cap);
+        if (!new_seq) return 0;
+        char *new_qual = (char *)realloc(l->qual_buf, new_cap);
+        if (!new_qual) {
+            l->seq_buf = new_seq;
+            return 0;
+        }
+        l->seq_buf = new_seq;
+        l->qual_buf = new_qual;
+        l->seq_buf_cap = new_cap;
     }
+    return 1;
 }
 
 /* ================================================================
@@ -413,6 +424,13 @@ static void bam_read_bind(duckdb_bind_info info) {
         region = duckdb_get_varchar(region_val);
     if (region_val) duckdb_destroy_value(&region_val);
 
+    /* Parse optional explicit index path */
+    char *index_path = NULL;
+    duckdb_value index_val = duckdb_bind_get_named_parameter(info, "index_path");
+    if (index_val && !duckdb_is_null_value(index_val))
+        index_path = duckdb_get_varchar(index_val);
+    if (index_val) duckdb_destroy_value(&index_val);
+
     /* Parse optional reference for CRAM */
     char *reference = NULL;
     duckdb_value ref_val = duckdb_bind_get_named_parameter(info, "reference");
@@ -427,6 +445,7 @@ static void bam_read_bind(duckdb_bind_info info) {
         snprintf(err, sizeof(err), "Failed to open SAM/BAM/CRAM file: %s", file_path);
         duckdb_bind_set_error(info, err);
         duckdb_free(file_path);
+        if (index_path) duckdb_free(index_path);
         if (region) duckdb_free(region);
         if (reference) duckdb_free(reference);
         return;
@@ -440,6 +459,7 @@ static void bam_read_bind(duckdb_bind_info info) {
         sam_close(fp);
         duckdb_bind_set_error(info, "Failed to read SAM/BAM/CRAM header");
         duckdb_free(file_path);
+        if (index_path) duckdb_free(index_path);
         if (region) duckdb_free(region);
         if (reference) duckdb_free(reference);
         return;
@@ -448,6 +468,7 @@ static void bam_read_bind(duckdb_bind_info info) {
     bam_bind_data_t *bind = (bam_bind_data_t *)duckdb_malloc(sizeof(bam_bind_data_t));
     memset(bind, 0, sizeof(bam_bind_data_t));
     bind->file_path = file_path;
+    bind->index_path = index_path;
     bind->reference = reference;
     bind->region = region;
     bind->n_contigs = sam_hdr_nref(hdr);
@@ -474,7 +495,7 @@ static void bam_read_bind(duckdb_bind_info info) {
     if (aux_val) duckdb_destroy_value(&aux_val);
 
     /* Check for index availability */
-    hts_idx_t *idx = sam_index_load(fp, file_path);
+    hts_idx_t *idx = sam_index_load3(fp, file_path, index_path, HTS_IDX_SILENT_FAIL);
     if (idx) {
         bind->has_index = 1;
         hts_idx_destroy(idx);
@@ -619,7 +640,7 @@ static void bam_read_local_init(duckdb_init_info info) {
 
     /* Load index if needed for parallel scanning or region queries */
     if (is_parallel || bind->n_regions > 0) {
-        local->idx = sam_index_load(local->fp, bind->file_path);
+        local->idx = sam_index_load3(local->fp, bind->file_path, bind->index_path, HTS_IDX_SILENT_FAIL);
         if (!local->idx) {
             if (bind->n_regions > 0) {
                 duckdb_init_set_error(info,
@@ -747,7 +768,12 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
         int seq_len = b->core.l_qseq;
 
         /* Grow SEQ/QUAL conversion buffers if needed */
-        ensure_seq_buf(local, seq_len);
+        if (!ensure_seq_buf(local, seq_len)) {
+            duckdb_function_set_error(info, "read_bam: out of memory allocating sequence buffers");
+            local->done = 1;
+            duckdb_data_chunk_set_size(output, 0);
+            return;
+        }
 
         for (idx_t i = 0; i < local->column_count; i++) {
             idx_t col_id = local->column_ids[i];
@@ -1017,6 +1043,7 @@ void register_read_bam_function(duckdb_connection connection) {
     duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
     duckdb_table_function_add_parameter(tf, varchar_type);
     duckdb_table_function_add_named_parameter(tf, "region", varchar_type);
+    duckdb_table_function_add_named_parameter(tf, "index_path", varchar_type);
     duckdb_table_function_add_named_parameter(tf, "reference", varchar_type);
     duckdb_destroy_logical_type(&varchar_type);
 
