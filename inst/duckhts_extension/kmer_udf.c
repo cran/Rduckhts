@@ -1,0 +1,1197 @@
+#include "duckdb_extension.h"
+DUCKDB_EXTENSION_EXTERN
+
+#include <ctype.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "include/seq_encoding.h"
+
+#define SAM_FLAG_PAIRED 0x1
+#define SAM_FLAG_PROPER_PAIR 0x2
+#define SAM_FLAG_UNMAPPED 0x4
+#define SAM_FLAG_MATE_UNMAPPED 0x8
+#define SAM_FLAG_REVERSE 0x10
+#define SAM_FLAG_MATE_REVERSE 0x20
+#define SAM_FLAG_READ1 0x40
+#define SAM_FLAG_READ2 0x80
+#define SAM_FLAG_SECONDARY 0x100
+#define SAM_FLAG_QCFAIL 0x200
+#define SAM_FLAG_DUPLICATE 0x400
+#define SAM_FLAG_SUPPLEMENTARY 0x800
+
+static const char *SAM_FLAG_FIELD_NAMES[] = {
+    "is_paired",
+    "is_proper_pair",
+    "is_unmapped",
+    "is_next_segment_unmapped",
+    "is_reverse_complemented",
+    "is_next_segment_reverse_complemented",
+    "is_first_segment",
+    "is_last_segment",
+    "is_secondary",
+    "is_qc_fail",
+    "is_duplicate",
+    "is_supplementary"
+};
+
+static const uint16_t SAM_FLAG_FIELD_MASKS[] = {
+    SAM_FLAG_PAIRED,
+    SAM_FLAG_PROPER_PAIR,
+    SAM_FLAG_UNMAPPED,
+    SAM_FLAG_MATE_UNMAPPED,
+    SAM_FLAG_REVERSE,
+    SAM_FLAG_MATE_REVERSE,
+    SAM_FLAG_READ1,
+    SAM_FLAG_READ2,
+    SAM_FLAG_SECONDARY,
+    SAM_FLAG_QCFAIL,
+    SAM_FLAG_DUPLICATE,
+    SAM_FLAG_SUPPLEMENTARY
+};
+
+enum { SAM_FLAG_FIELD_COUNT = (int)(sizeof(SAM_FLAG_FIELD_MASKS) / sizeof(SAM_FLAG_FIELD_MASKS[0])) };
+
+typedef struct {
+    int valid;
+    int has_soft_clip;
+    int has_hard_clip;
+    int64_t left_soft_clip;
+    int64_t right_soft_clip;
+    int64_t query_length;
+    int64_t aligned_query_length;
+    int64_t reference_length;
+} cigar_metrics_t;
+
+enum {
+    CIGAR_METRIC_HAS_SOFT_CLIP = 1,
+    CIGAR_METRIC_HAS_HARD_CLIP = 2,
+    CIGAR_METRIC_LEFT_SOFT_CLIP = 3,
+    CIGAR_METRIC_RIGHT_SOFT_CLIP = 4,
+    CIGAR_METRIC_QUERY_LENGTH = 5,
+    CIGAR_METRIC_ALIGNED_QUERY_LENGTH = 6,
+    CIGAR_METRIC_REFERENCE_LENGTH = 7
+};
+
+static inline void set_null_at(duckdb_vector vector, idx_t row) {
+    duckdb_vector_ensure_validity_writable(vector);
+    uint64_t *validity = duckdb_vector_get_validity(vector);
+    duckdb_validity_set_row_invalid(validity, row);
+}
+
+static inline int row_is_valid(duckdb_vector vector, idx_t row) {
+    uint64_t *validity = duckdb_vector_get_validity(vector);
+    if (!validity) {
+        return 1;
+    }
+    return duckdb_validity_row_is_valid(validity, row);
+}
+
+static inline char dna_complement(char c) {
+    switch ((unsigned char)toupper((unsigned char)c)) {
+    case 'A': return 'T';
+    case 'C': return 'G';
+    case 'G': return 'C';
+    case 'T': return 'A';
+    case 'N': return 'N';
+    default:  return '\0';
+    }
+}
+
+static inline int dna_to_2bit(char c) {
+    switch ((unsigned char)toupper((unsigned char)c)) {
+    case 'A': return 0;
+    case 'C': return 1;
+    case 'G': return 2;
+    case 'T': return 3;
+    default:  return -1;
+    }
+}
+
+/* iupac_to_4bit and bit4_to_iupac removed — use seq_text_to_nt16() and
+   seq_nt16_to_text() from seq_encoding.h instead. */
+
+static inline const char *get_string_at(duckdb_vector vector, idx_t row, idx_t *len) {
+    duckdb_string_t *data = (duckdb_string_t *)duckdb_vector_get_data(vector);
+    duckdb_string_t *val = &data[row];
+    *len = duckdb_string_t_length(*val);
+    return duckdb_string_t_data(val);
+}
+
+static inline int64_t get_int64_at(duckdb_vector vector, idx_t row) {
+    duckdb_logical_type logical_type = duckdb_vector_get_column_type(vector);
+    duckdb_type type = duckdb_get_type_id(logical_type);
+    void *data = duckdb_vector_get_data(vector);
+    int64_t result = 0;
+
+    switch (type) {
+    case DUCKDB_TYPE_TINYINT:
+        result = ((int8_t *)data)[row];
+        break;
+    case DUCKDB_TYPE_SMALLINT:
+        result = ((int16_t *)data)[row];
+        break;
+    case DUCKDB_TYPE_INTEGER:
+        result = ((int32_t *)data)[row];
+        break;
+    case DUCKDB_TYPE_BIGINT:
+        result = ((int64_t *)data)[row];
+        break;
+    case DUCKDB_TYPE_UTINYINT:
+        result = ((uint8_t *)data)[row];
+        break;
+    case DUCKDB_TYPE_USMALLINT:
+        result = ((uint16_t *)data)[row];
+        break;
+    case DUCKDB_TYPE_UINTEGER:
+        result = ((uint32_t *)data)[row];
+        break;
+    case DUCKDB_TYPE_UBIGINT:
+        result = (int64_t)((uint64_t *)data)[row];
+        break;
+    default:
+        result = 0;
+        break;
+    }
+    duckdb_destroy_logical_type(&logical_type);
+    return result;
+}
+
+static int parse_cigar_metrics(const char *cigar, idx_t len, cigar_metrics_t *metrics) {
+    int64_t op_len = 0;
+    int saw_op = 0;
+    char first_op = '\0';
+    int64_t first_len = 0;
+    char last_op = '\0';
+    int64_t last_len = 0;
+
+    memset(metrics, 0, sizeof(*metrics));
+    if (!cigar || len == 0 || (len == 1 && cigar[0] == '*')) {
+        return 0;
+    }
+
+    for (idx_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)cigar[i];
+        if (isdigit(c)) {
+            op_len = op_len * 10 + (int64_t)(c - '0');
+            continue;
+        }
+        if (op_len <= 0) {
+            return 0;
+        }
+
+        switch (c) {
+        case 'M':
+        case '=':
+        case 'X':
+            metrics->query_length += op_len;
+            metrics->aligned_query_length += op_len;
+            metrics->reference_length += op_len;
+            break;
+        case 'I':
+            metrics->query_length += op_len;
+            break;
+        case 'S':
+            metrics->query_length += op_len;
+            metrics->has_soft_clip = 1;
+            break;
+        case 'H':
+            metrics->has_hard_clip = 1;
+            break;
+        case 'D':
+        case 'N':
+            metrics->reference_length += op_len;
+            break;
+        case 'P':
+            break;
+        default:
+            return 0;
+        }
+
+        if (!saw_op) {
+            first_op = (char)c;
+            first_len = op_len;
+        }
+        last_op = (char)c;
+        last_len = op_len;
+        saw_op = 1;
+        op_len = 0;
+    }
+
+    if (!saw_op || op_len != 0) {
+        return 0;
+    }
+    if (first_op == 'S') {
+        metrics->left_soft_clip = first_len;
+    }
+    if (last_op == 'S') {
+        metrics->right_soft_clip = last_len;
+    }
+    metrics->valid = 1;
+    return 1;
+}
+
+static int cigar_has_operator_text(const char *cigar, idx_t cigar_len, char op) {
+    int64_t op_len = 0;
+
+    if (!cigar || cigar_len == 0 || (cigar_len == 1 && cigar[0] == '*')) {
+        return 0;
+    }
+    for (idx_t i = 0; i < cigar_len; i++) {
+        unsigned char c = (unsigned char)cigar[i];
+        if (isdigit(c)) {
+            op_len = op_len * 10 + (int64_t)(c - '0');
+            continue;
+        }
+        if (op_len <= 0) {
+            return -1;
+        }
+        if ((char)c == op) {
+            return 1;
+        }
+        op_len = 0;
+    }
+    if (op_len != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static void seq_revcomp_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+    (void)info;
+    duckdb_vector seq_vec = duckdb_data_chunk_get_vector(input, 0);
+    idx_t row_count = duckdb_data_chunk_get_size(input);
+
+    for (idx_t row = 0; row < row_count; row++) {
+        if (!row_is_valid(seq_vec, row)) {
+            set_null_at(output, row);
+            continue;
+        }
+
+        idx_t len = 0;
+        const char *seq = get_string_at(seq_vec, row, &len);
+        char *out = (char *)duckdb_malloc((size_t)len + 1);
+        if (!out) {
+            duckdb_scalar_function_set_error(info, "seq_revcomp: out of memory");
+            return;
+        }
+
+        int valid = 1;
+        for (idx_t i = 0; i < len; i++) {
+            char rc = dna_complement(seq[len - 1 - i]);
+            if (!rc) {
+                valid = 0;
+                break;
+            }
+            out[i] = rc;
+        }
+
+        if (!valid) {
+            set_null_at(output, row);
+            duckdb_free(out);
+            continue;
+        }
+
+        out[len] = '\0';
+        duckdb_vector_assign_string_element_len(output, row, out, len);
+        duckdb_free(out);
+    }
+}
+
+static void seq_canonical_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+    (void)info;
+    duckdb_vector seq_vec = duckdb_data_chunk_get_vector(input, 0);
+    idx_t row_count = duckdb_data_chunk_get_size(input);
+
+    for (idx_t row = 0; row < row_count; row++) {
+        if (!row_is_valid(seq_vec, row)) {
+            set_null_at(output, row);
+            continue;
+        }
+
+        idx_t len = 0;
+        const char *seq = get_string_at(seq_vec, row, &len);
+
+        char *fwd = (char *)duckdb_malloc((size_t)len + 1);
+        char *rev = (char *)duckdb_malloc((size_t)len + 1);
+        if (!fwd || !rev) {
+            if (fwd) duckdb_free(fwd);
+            if (rev) duckdb_free(rev);
+            duckdb_scalar_function_set_error(info, "seq_canonical: out of memory");
+            return;
+        }
+
+        int valid = 1;
+        for (idx_t i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)toupper((unsigned char)seq[i]);
+            char rc = dna_complement(seq[len - 1 - i]);
+            if (!rc || (c != 'A' && c != 'C' && c != 'G' && c != 'T' && c != 'N')) {
+                valid = 0;
+                break;
+            }
+            fwd[i] = (char)c;
+            rev[i] = rc;
+        }
+
+        if (!valid) {
+            set_null_at(output, row);
+            duckdb_free(fwd);
+            duckdb_free(rev);
+            continue;
+        }
+
+        fwd[len] = '\0';
+        rev[len] = '\0';
+
+        const char *chosen = (memcmp(fwd, rev, (size_t)len) <= 0) ? fwd : rev;
+        duckdb_vector_assign_string_element_len(output, row, chosen, len);
+        duckdb_free(fwd);
+        duckdb_free(rev);
+    }
+}
+
+static void seq_hash_2bit_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+    (void)info;
+    duckdb_vector seq_vec = duckdb_data_chunk_get_vector(input, 0);
+    uint64_t *out_data = (uint64_t *)duckdb_vector_get_data(output);
+    idx_t row_count = duckdb_data_chunk_get_size(input);
+
+    for (idx_t row = 0; row < row_count; row++) {
+        if (!row_is_valid(seq_vec, row)) {
+            set_null_at(output, row);
+            continue;
+        }
+
+        idx_t len = 0;
+        const char *seq = get_string_at(seq_vec, row, &len);
+        if (len > 32) {
+            set_null_at(output, row);
+            continue;
+        }
+
+        uint64_t h = 0;
+        int valid = 1;
+        for (idx_t i = 0; i < len; i++) {
+            int code = dna_to_2bit(seq[i]);
+            if (code < 0) {
+                valid = 0;
+                break;
+            }
+            h = (h << 2) | (uint64_t)code;
+        }
+
+        if (!valid) {
+            set_null_at(output, row);
+            continue;
+        }
+
+        out_data[row] = h;
+    }
+}
+
+static void seq_encode_4bit_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+    (void)info;
+    duckdb_vector seq_vec = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_list_entry *list_data = (duckdb_list_entry *)duckdb_vector_get_data(output);
+    duckdb_vector child_vec = duckdb_list_vector_get_child(output);
+    idx_t row_count = duckdb_data_chunk_get_size(input);
+    idx_t child_offset = duckdb_list_vector_get_size(output);
+
+    for (idx_t row = 0; row < row_count; row++) {
+        list_data[row].offset = child_offset;
+        list_data[row].length = 0;
+
+        if (!row_is_valid(seq_vec, row)) {
+            set_null_at(output, row);
+            continue;
+        }
+
+        idx_t len = 0;
+        const char *seq = get_string_at(seq_vec, row, &len);
+        if (duckdb_list_vector_reserve(output, child_offset + len) != DuckDBSuccess) {
+            duckdb_scalar_function_set_error(info, "seq_encode_4bit: failed to reserve list storage");
+            return;
+        }
+        if (duckdb_list_vector_set_size(output, child_offset + len) != DuckDBSuccess) {
+            duckdb_scalar_function_set_error(info, "seq_encode_4bit: failed to grow list storage");
+            return;
+        }
+
+        uint8_t *child_data = (uint8_t *)duckdb_vector_get_data(child_vec);
+        /* Permissive encoding via shared helper — unknown chars → N (15),
+           matching htslib seq_nt16_table behavior exactly. */
+        seq_text_to_nt16(seq, child_data + child_offset, len);
+
+        list_data[row].length = len;
+        child_offset += len;
+    }
+}
+
+static void seq_decode_4bit_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+    (void)info;
+    duckdb_vector codes_vec = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_list_entry *list_data = (duckdb_list_entry *)duckdb_vector_get_data(codes_vec);
+    duckdb_vector child_vec = duckdb_list_vector_get_child(codes_vec);
+    uint8_t *child_data = (uint8_t *)duckdb_vector_get_data(child_vec);
+    idx_t row_count = duckdb_data_chunk_get_size(input);
+
+    for (idx_t row = 0; row < row_count; row++) {
+        if (!row_is_valid(codes_vec, row)) {
+            set_null_at(output, row);
+            continue;
+        }
+
+        duckdb_list_entry entry = list_data[row];
+        char *decoded = (char *)duckdb_malloc((size_t)entry.length + 1);
+        if (!decoded) {
+            duckdb_scalar_function_set_error(info, "seq_decode_4bit: out of memory");
+            return;
+        }
+
+        /* Check for NULL child elements, then decode via shared helper.
+           seq_nt16_to_text returns -1 if any code > 15. */
+        int has_null_child = 0;
+        for (idx_t i = 0; i < entry.length; i++) {
+            if (!row_is_valid(child_vec, entry.offset + i)) {
+                has_null_child = 1;
+                break;
+            }
+        }
+
+        if (has_null_child ||
+            seq_nt16_to_text(child_data + entry.offset, decoded, entry.length) < 0) {
+            set_null_at(output, row);
+            duckdb_free(decoded);
+            continue;
+        }
+
+        duckdb_vector_assign_string_element_len(output, row, decoded, entry.length);
+        duckdb_free(decoded);
+    }
+}
+
+static void seq_gc_content_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+    (void)info;
+    duckdb_vector seq_vec = duckdb_data_chunk_get_vector(input, 0);
+    double *out_data = (double *)duckdb_vector_get_data(output);
+    idx_t row_count = duckdb_data_chunk_get_size(input);
+
+    for (idx_t row = 0; row < row_count; row++) {
+        if (!row_is_valid(seq_vec, row)) {
+            set_null_at(output, row);
+            continue;
+        }
+
+        idx_t len = 0;
+        const char *seq = get_string_at(seq_vec, row, &len);
+        if (len == 0) {
+            set_null_at(output, row);
+            continue;
+        }
+
+        idx_t gc = 0;
+        idx_t called = 0;
+        int valid = 1;
+        for (idx_t i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)toupper((unsigned char)seq[i]);
+            switch (c) {
+            case 'G':
+            case 'C':
+                gc++;
+                called++;
+                break;
+            case 'A':
+            case 'T':
+                called++;
+                break;
+            case 'N':
+                break;
+            default:
+                valid = 0;
+                break;
+            }
+            if (!valid) {
+                break;
+            }
+        }
+
+        if (!valid || called == 0) {
+            set_null_at(output, row);
+            continue;
+        }
+        out_data[row] = (double)gc / (double)called;
+    }
+}
+
+static void sam_flag_scalar(duckdb_function_info info,
+                            duckdb_data_chunk input,
+                            duckdb_vector output,
+                            uint16_t mask) {
+    (void)info;
+    duckdb_vector flag_vec = duckdb_data_chunk_get_vector(input, 0);
+    bool *out_data = (bool *)duckdb_vector_get_data(output);
+    idx_t row_count = duckdb_data_chunk_get_size(input);
+
+    for (idx_t row = 0; row < row_count; row++) {
+        if (!row_is_valid(flag_vec, row)) {
+            set_null_at(output, row);
+            continue;
+        }
+        int64_t flag_value = get_int64_at(flag_vec, row);
+        if (flag_value < 0 || flag_value > 0xffff) {
+            set_null_at(output, row);
+            continue;
+        }
+        out_data[row] = ((((uint16_t)flag_value) & mask) != 0);
+    }
+}
+
+static void sam_flag_predicate_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+    uint16_t mask = (uint16_t)(uintptr_t)duckdb_scalar_function_get_extra_info(info);
+    sam_flag_scalar(info, input, output, mask);
+}
+
+static void sam_is_forward_aligned_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+    (void)info;
+    duckdb_vector flag_vec = duckdb_data_chunk_get_vector(input, 0);
+    bool *out_data = (bool *)duckdb_vector_get_data(output);
+    idx_t row_count = duckdb_data_chunk_get_size(input);
+
+    for (idx_t row = 0; row < row_count; row++) {
+        if (!row_is_valid(flag_vec, row)) {
+            set_null_at(output, row);
+            continue;
+        }
+        int64_t flag_value = get_int64_at(flag_vec, row);
+        if (flag_value < 0 || flag_value > 0xffff) {
+            set_null_at(output, row);
+            continue;
+        }
+        uint16_t flag = (uint16_t)flag_value;
+        if ((flag & SAM_FLAG_UNMAPPED) != 0) {
+            set_null_at(output, row);
+            continue;
+        }
+        out_data[row] = ((flag & SAM_FLAG_REVERSE) == 0);
+    }
+}
+
+static void sam_flag_has_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+    (void)info;
+    duckdb_vector flag_vec = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_vector mask_vec = duckdb_data_chunk_get_vector(input, 1);
+    bool *out_data = (bool *)duckdb_vector_get_data(output);
+    idx_t row_count = duckdb_data_chunk_get_size(input);
+
+    for (idx_t row = 0; row < row_count; row++) {
+        if (!row_is_valid(flag_vec, row) || !row_is_valid(mask_vec, row)) {
+            set_null_at(output, row);
+            continue;
+        }
+        int64_t flag_value = get_int64_at(flag_vec, row);
+        int64_t mask_value = get_int64_at(mask_vec, row);
+        if (flag_value < 0 || flag_value > 0xffff || mask_value < 0 || mask_value > 0xffff) {
+            set_null_at(output, row);
+            continue;
+        }
+        out_data[row] = ((((uint16_t)flag_value) & ((uint16_t)mask_value)) != 0);
+    }
+}
+
+static void sam_flag_bits_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+    (void)info;
+    duckdb_vector flag_vec = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_vector child_vecs[SAM_FLAG_FIELD_COUNT];
+    bool *child_data[SAM_FLAG_FIELD_COUNT];
+    idx_t row_count = duckdb_data_chunk_get_size(input);
+
+    for (int i = 0; i < SAM_FLAG_FIELD_COUNT; i++) {
+        child_vecs[i] = duckdb_struct_vector_get_child(output, (idx_t)i);
+        child_data[i] = (bool *)duckdb_vector_get_data(child_vecs[i]);
+    }
+
+    for (idx_t row = 0; row < row_count; row++) {
+        if (!row_is_valid(flag_vec, row)) {
+            set_null_at(output, row);
+            for (int i = 0; i < SAM_FLAG_FIELD_COUNT; i++) {
+                set_null_at(child_vecs[i], row);
+            }
+            continue;
+        }
+
+        int64_t flag_value = get_int64_at(flag_vec, row);
+        if (flag_value < 0 || flag_value > 0xffff) {
+            set_null_at(output, row);
+            for (int i = 0; i < SAM_FLAG_FIELD_COUNT; i++) {
+                set_null_at(child_vecs[i], row);
+            }
+            continue;
+        }
+
+        uint16_t flag_bits = (uint16_t)flag_value;
+        for (int i = 0; i < SAM_FLAG_FIELD_COUNT; i++) {
+            child_data[i][row] = ((flag_bits & SAM_FLAG_FIELD_MASKS[i]) != 0);
+        }
+    }
+}
+
+static void cigar_metric_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+    uintptr_t metric_id = (uintptr_t)duckdb_scalar_function_get_extra_info(info);
+    duckdb_vector cigar_vec = duckdb_data_chunk_get_vector(input, 0);
+    idx_t row_count = duckdb_data_chunk_get_size(input);
+    cigar_metrics_t metrics;
+
+    for (idx_t row = 0; row < row_count; row++) {
+        if (!row_is_valid(cigar_vec, row)) {
+            set_null_at(output, row);
+            continue;
+        }
+
+        idx_t cigar_len = 0;
+        const char *cigar = get_string_at(cigar_vec, row, &cigar_len);
+        if (!parse_cigar_metrics(cigar, cigar_len, &metrics)) {
+            set_null_at(output, row);
+            continue;
+        }
+
+        if (metric_id == CIGAR_METRIC_HAS_SOFT_CLIP || metric_id == CIGAR_METRIC_HAS_HARD_CLIP) {
+            bool *out_data = (bool *)duckdb_vector_get_data(output);
+            out_data[row] = (metric_id == CIGAR_METRIC_HAS_SOFT_CLIP) ? (metrics.has_soft_clip != 0)
+                                                                       : (metrics.has_hard_clip != 0);
+        } else {
+            int64_t *out_data = (int64_t *)duckdb_vector_get_data(output);
+            switch (metric_id) {
+            case CIGAR_METRIC_LEFT_SOFT_CLIP:
+                out_data[row] = metrics.left_soft_clip;
+                break;
+            case CIGAR_METRIC_RIGHT_SOFT_CLIP:
+                out_data[row] = metrics.right_soft_clip;
+                break;
+            case CIGAR_METRIC_QUERY_LENGTH:
+                out_data[row] = metrics.query_length;
+                break;
+            case CIGAR_METRIC_ALIGNED_QUERY_LENGTH:
+                out_data[row] = metrics.aligned_query_length;
+                break;
+            case CIGAR_METRIC_REFERENCE_LENGTH:
+                out_data[row] = metrics.reference_length;
+                break;
+            default:
+                set_null_at(output, row);
+                break;
+            }
+        }
+    }
+}
+
+static void cigar_has_op_scalar(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+    (void)info;
+    duckdb_vector cigar_vec = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_vector op_vec = duckdb_data_chunk_get_vector(input, 1);
+    bool *out_data = (bool *)duckdb_vector_get_data(output);
+    idx_t row_count = duckdb_data_chunk_get_size(input);
+
+    for (idx_t row = 0; row < row_count; row++) {
+        if (!row_is_valid(cigar_vec, row) || !row_is_valid(op_vec, row)) {
+            set_null_at(output, row);
+            continue;
+        }
+
+        idx_t cigar_len = 0;
+        idx_t op_len = 0;
+        const char *cigar = get_string_at(cigar_vec, row, &cigar_len);
+        const char *op_text = get_string_at(op_vec, row, &op_len);
+        if (op_len != 1) {
+            set_null_at(output, row);
+            continue;
+        }
+
+        char op = (char)toupper((unsigned char)op_text[0]);
+        switch (op) {
+        case 'M':
+        case 'I':
+        case 'D':
+        case 'N':
+        case 'S':
+        case 'H':
+        case 'P':
+        case '=':
+        case 'X':
+            break;
+        default:
+            set_null_at(output, row);
+            continue;
+        }
+
+        int has_op = cigar_has_operator_text(cigar, cigar_len, op);
+        if (has_op < 0) {
+            set_null_at(output, row);
+            continue;
+        }
+        out_data[row] = (has_op != 0);
+    }
+}
+
+typedef struct {
+    char *sequence;
+    idx_t seq_len;
+    idx_t k;
+    int canonical;
+} seq_kmers_bind_t;
+
+typedef struct {
+    idx_t next_pos;
+} seq_kmers_init_t;
+
+static void destroy_seq_kmers_bind(void *data) {
+    seq_kmers_bind_t *bind = (seq_kmers_bind_t *)data;
+    if (!bind) {
+        return;
+    }
+    if (bind->sequence) {
+        duckdb_free(bind->sequence);
+    }
+    duckdb_free(bind);
+}
+
+static void destroy_seq_kmers_init(void *data) {
+    if (data) {
+        duckdb_free(data);
+    }
+}
+
+static void seq_kmers_bind(duckdb_bind_info info) {
+    duckdb_value seq_val = duckdb_bind_get_parameter(info, 0);
+    duckdb_value k_val = duckdb_bind_get_parameter(info, 1);
+    duckdb_value canonical_val = duckdb_bind_get_named_parameter(info, "canonical");
+
+    if (!seq_val || duckdb_is_null_value(seq_val)) {
+        duckdb_bind_set_error(info, "seq_kmers: sequence must not be NULL");
+        if (seq_val) duckdb_destroy_value(&seq_val);
+        if (k_val) duckdb_destroy_value(&k_val);
+        if (canonical_val) duckdb_destroy_value(&canonical_val);
+        return;
+    }
+
+    if (!k_val || duckdb_is_null_value(k_val)) {
+        duckdb_bind_set_error(info, "seq_kmers: k must not be NULL");
+        if (seq_val) duckdb_destroy_value(&seq_val);
+        if (k_val) duckdb_destroy_value(&k_val);
+        if (canonical_val) duckdb_destroy_value(&canonical_val);
+        return;
+    }
+
+    char *sequence = duckdb_get_varchar(seq_val);
+    int64_t k = duckdb_get_int64(k_val);
+    int canonical = 0;
+
+    if (canonical_val && !duckdb_is_null_value(canonical_val)) {
+        canonical = duckdb_get_bool(canonical_val) ? 1 : 0;
+    }
+
+    if (seq_val) duckdb_destroy_value(&seq_val);
+    if (k_val) duckdb_destroy_value(&k_val);
+    if (canonical_val) duckdb_destroy_value(&canonical_val);
+
+    if (!sequence) {
+        duckdb_bind_set_error(info, "seq_kmers: failed to read sequence");
+        return;
+    }
+    if (k <= 0) {
+        duckdb_bind_set_error(info, "seq_kmers: k must be > 0");
+        duckdb_free(sequence);
+        return;
+    }
+
+    seq_kmers_bind_t *bind = (seq_kmers_bind_t *)duckdb_malloc(sizeof(seq_kmers_bind_t));
+    if (!bind) {
+        duckdb_bind_set_error(info, "seq_kmers: out of memory");
+        duckdb_free(sequence);
+        return;
+    }
+
+    bind->sequence = sequence;
+    bind->seq_len = (idx_t)strlen(sequence);
+    bind->k = (idx_t)k;
+    bind->canonical = canonical;
+
+    duckdb_logical_type bigint_type = duckdb_create_logical_type(DUCKDB_TYPE_BIGINT);
+    duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+    duckdb_bind_add_result_column(info, "pos", bigint_type);
+    duckdb_bind_add_result_column(info, "kmer", varchar_type);
+    duckdb_destroy_logical_type(&bigint_type);
+    duckdb_destroy_logical_type(&varchar_type);
+
+    idx_t n_kmers = 0;
+    if (bind->seq_len >= bind->k) {
+        n_kmers = bind->seq_len - bind->k + 1;
+    }
+    duckdb_bind_set_cardinality(info, n_kmers, true);
+    duckdb_bind_set_bind_data(info, bind, destroy_seq_kmers_bind);
+}
+
+static void seq_kmers_init(duckdb_init_info info) {
+    seq_kmers_init_t *init = (seq_kmers_init_t *)duckdb_malloc(sizeof(seq_kmers_init_t));
+    if (!init) {
+        duckdb_init_set_error(info, "seq_kmers: out of memory");
+        return;
+    }
+    init->next_pos = 0;
+    duckdb_init_set_max_threads(info, 1);
+    duckdb_init_set_init_data(info, init, destroy_seq_kmers_init);
+}
+
+static void seq_kmers_function(duckdb_function_info info, duckdb_data_chunk output) {
+    seq_kmers_bind_t *bind = (seq_kmers_bind_t *)duckdb_function_get_bind_data(info);
+    seq_kmers_init_t *init = (seq_kmers_init_t *)duckdb_function_get_init_data(info);
+
+    if (!bind || !init || bind->seq_len < bind->k) {
+        duckdb_data_chunk_set_size(output, 0);
+        return;
+    }
+
+    idx_t total = bind->seq_len - bind->k + 1;
+    if (init->next_pos >= total) {
+        duckdb_data_chunk_set_size(output, 0);
+        return;
+    }
+
+    idx_t vector_size = duckdb_vector_size();
+    idx_t remaining = total - init->next_pos;
+    idx_t emit = remaining < vector_size ? remaining : vector_size;
+
+    duckdb_vector pos_vec = duckdb_data_chunk_get_vector(output, 0);
+    duckdb_vector kmer_vec = duckdb_data_chunk_get_vector(output, 1);
+    int64_t *pos_data = (int64_t *)duckdb_vector_get_data(pos_vec);
+
+    char *fwd = NULL;
+    char *rev = NULL;
+    if (bind->canonical) {
+        fwd = (char *)duckdb_malloc((size_t)bind->k + 1);
+        rev = (char *)duckdb_malloc((size_t)bind->k + 1);
+        if (!fwd || !rev) {
+            if (fwd) duckdb_free(fwd);
+            if (rev) duckdb_free(rev);
+            duckdb_function_set_error(info, "seq_kmers: out of memory");
+            return;
+        }
+        fwd[bind->k] = '\0';
+        rev[bind->k] = '\0';
+    }
+
+    for (idx_t i = 0; i < emit; i++) {
+        idx_t start = init->next_pos + i;
+        pos_data[i] = (int64_t)start + 1;
+
+        if (!bind->canonical) {
+            duckdb_vector_assign_string_element_len(kmer_vec, i, bind->sequence + start, bind->k);
+            continue;
+        }
+
+        int valid = 1;
+        for (idx_t j = 0; j < bind->k; j++) {
+            unsigned char b = (unsigned char)toupper((unsigned char)bind->sequence[start + j]);
+            char rc = dna_complement(bind->sequence[start + bind->k - 1 - j]);
+            if (!rc || (b != 'A' && b != 'C' && b != 'G' && b != 'T' && b != 'N')) {
+                valid = 0;
+                break;
+            }
+            fwd[j] = (char)b;
+            rev[j] = rc;
+        }
+
+        if (!valid) {
+            set_null_at(kmer_vec, i);
+            continue;
+        }
+
+        const char *chosen = (memcmp(fwd, rev, (size_t)bind->k) <= 0) ? fwd : rev;
+        duckdb_vector_assign_string_element_len(kmer_vec, i, chosen, bind->k);
+    }
+
+    if (fwd) duckdb_free(fwd);
+    if (rev) duckdb_free(rev);
+
+    init->next_pos += emit;
+    duckdb_data_chunk_set_size(output, emit);
+}
+
+static void register_seq_revcomp_function(duckdb_connection connection) {
+    duckdb_scalar_function fn = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(fn, "seq_revcomp");
+
+    duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+    duckdb_scalar_function_add_parameter(fn, varchar_type);
+    duckdb_scalar_function_set_return_type(fn, varchar_type);
+    duckdb_scalar_function_set_function(fn, seq_revcomp_scalar);
+
+    duckdb_register_scalar_function(connection, fn);
+
+    duckdb_destroy_logical_type(&varchar_type);
+    duckdb_destroy_scalar_function(&fn);
+}
+
+static void register_seq_canonical_function(duckdb_connection connection) {
+    duckdb_scalar_function fn = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(fn, "seq_canonical");
+
+    duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+    duckdb_scalar_function_add_parameter(fn, varchar_type);
+    duckdb_scalar_function_set_return_type(fn, varchar_type);
+    duckdb_scalar_function_set_function(fn, seq_canonical_scalar);
+
+    duckdb_register_scalar_function(connection, fn);
+
+    duckdb_destroy_logical_type(&varchar_type);
+    duckdb_destroy_scalar_function(&fn);
+}
+
+static void register_seq_hash_2bit_function(duckdb_connection connection) {
+    duckdb_scalar_function fn = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(fn, "seq_hash_2bit");
+
+    duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+    duckdb_logical_type ubigint_type = duckdb_create_logical_type(DUCKDB_TYPE_UBIGINT);
+    duckdb_scalar_function_add_parameter(fn, varchar_type);
+    duckdb_scalar_function_set_return_type(fn, ubigint_type);
+    duckdb_scalar_function_set_function(fn, seq_hash_2bit_scalar);
+
+    duckdb_register_scalar_function(connection, fn);
+
+    duckdb_destroy_logical_type(&varchar_type);
+    duckdb_destroy_logical_type(&ubigint_type);
+    duckdb_destroy_scalar_function(&fn);
+}
+
+static void register_seq_encode_4bit_function(duckdb_connection connection) {
+    duckdb_scalar_function fn = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(fn, "seq_encode_4bit");
+
+    duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+    duckdb_logical_type utinyint_type = duckdb_create_logical_type(DUCKDB_TYPE_UTINYINT);
+    duckdb_logical_type list_type = duckdb_create_list_type(utinyint_type);
+    duckdb_scalar_function_add_parameter(fn, varchar_type);
+    duckdb_scalar_function_set_return_type(fn, list_type);
+    duckdb_scalar_function_set_function(fn, seq_encode_4bit_scalar);
+
+    duckdb_register_scalar_function(connection, fn);
+
+    duckdb_destroy_logical_type(&varchar_type);
+    duckdb_destroy_logical_type(&utinyint_type);
+    duckdb_destroy_logical_type(&list_type);
+    duckdb_destroy_scalar_function(&fn);
+}
+
+static void register_seq_decode_4bit_function(duckdb_connection connection) {
+    duckdb_scalar_function fn = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(fn, "seq_decode_4bit");
+
+    duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+    duckdb_logical_type utinyint_type = duckdb_create_logical_type(DUCKDB_TYPE_UTINYINT);
+    duckdb_logical_type list_type = duckdb_create_list_type(utinyint_type);
+    duckdb_scalar_function_add_parameter(fn, list_type);
+    duckdb_scalar_function_set_return_type(fn, varchar_type);
+    duckdb_scalar_function_set_function(fn, seq_decode_4bit_scalar);
+
+    duckdb_register_scalar_function(connection, fn);
+
+    duckdb_destroy_logical_type(&varchar_type);
+    duckdb_destroy_logical_type(&utinyint_type);
+    duckdb_destroy_logical_type(&list_type);
+    duckdb_destroy_scalar_function(&fn);
+}
+
+static void register_seq_gc_content_function(duckdb_connection connection) {
+    duckdb_scalar_function fn = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(fn, "seq_gc_content");
+
+    duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+    duckdb_logical_type double_type = duckdb_create_logical_type(DUCKDB_TYPE_DOUBLE);
+    duckdb_scalar_function_add_parameter(fn, varchar_type);
+    duckdb_scalar_function_set_return_type(fn, double_type);
+    duckdb_scalar_function_set_function(fn, seq_gc_content_scalar);
+
+    duckdb_register_scalar_function(connection, fn);
+
+    duckdb_destroy_logical_type(&varchar_type);
+    duckdb_destroy_logical_type(&double_type);
+    duckdb_destroy_scalar_function(&fn);
+}
+
+static void register_sam_flag_predicate_function(duckdb_connection connection,
+                                                 const char *name,
+                                                 uint16_t mask) {
+    duckdb_scalar_function fn = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(fn, name);
+
+    duckdb_logical_type usmallint_type = duckdb_create_logical_type(DUCKDB_TYPE_USMALLINT);
+    duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
+    duckdb_scalar_function_add_parameter(fn, usmallint_type);
+    duckdb_scalar_function_set_return_type(fn, bool_type);
+    duckdb_scalar_function_set_function(fn, sam_flag_predicate_scalar);
+    duckdb_scalar_function_set_extra_info(fn, (void *)(uintptr_t)mask, NULL);
+
+    duckdb_register_scalar_function(connection, fn);
+
+    duckdb_destroy_logical_type(&usmallint_type);
+    duckdb_destroy_logical_type(&bool_type);
+    duckdb_destroy_scalar_function(&fn);
+}
+
+static void register_sam_flag_has_function(duckdb_connection connection) {
+    duckdb_scalar_function fn = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(fn, "sam_flag_has");
+
+    duckdb_logical_type usmallint_type = duckdb_create_logical_type(DUCKDB_TYPE_USMALLINT);
+    duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
+    duckdb_scalar_function_add_parameter(fn, usmallint_type);
+    duckdb_scalar_function_add_parameter(fn, usmallint_type);
+    duckdb_scalar_function_set_return_type(fn, bool_type);
+    duckdb_scalar_function_set_function(fn, sam_flag_has_scalar);
+
+    duckdb_register_scalar_function(connection, fn);
+
+    duckdb_destroy_logical_type(&usmallint_type);
+    duckdb_destroy_logical_type(&bool_type);
+    duckdb_destroy_scalar_function(&fn);
+}
+
+static void register_sam_is_forward_aligned_function(duckdb_connection connection) {
+    duckdb_scalar_function fn = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(fn, "is_forward_aligned");
+
+    duckdb_logical_type int_type = duckdb_create_logical_type(DUCKDB_TYPE_BIGINT);
+    duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
+    duckdb_scalar_function_add_parameter(fn, int_type);
+    duckdb_scalar_function_set_return_type(fn, bool_type);
+    duckdb_scalar_function_set_function(fn, sam_is_forward_aligned_scalar);
+
+    duckdb_register_scalar_function(connection, fn);
+
+    duckdb_destroy_logical_type(&int_type);
+    duckdb_destroy_logical_type(&bool_type);
+    duckdb_destroy_scalar_function(&fn);
+}
+
+static void register_sam_flag_bits_function(duckdb_connection connection) {
+    duckdb_scalar_function fn = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(fn, "sam_flag_bits");
+
+    duckdb_logical_type usmallint_type = duckdb_create_logical_type(DUCKDB_TYPE_USMALLINT);
+    duckdb_logical_type bool_types[SAM_FLAG_FIELD_COUNT];
+    duckdb_logical_type struct_type;
+
+    for (int i = 0; i < SAM_FLAG_FIELD_COUNT; i++) {
+        bool_types[i] = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
+    }
+    struct_type = duckdb_create_struct_type(bool_types, SAM_FLAG_FIELD_NAMES, SAM_FLAG_FIELD_COUNT);
+
+    duckdb_scalar_function_add_parameter(fn, usmallint_type);
+    duckdb_scalar_function_set_return_type(fn, struct_type);
+    duckdb_scalar_function_set_function(fn, sam_flag_bits_scalar);
+
+    duckdb_register_scalar_function(connection, fn);
+
+    duckdb_destroy_logical_type(&usmallint_type);
+    for (int i = 0; i < SAM_FLAG_FIELD_COUNT; i++) {
+        duckdb_destroy_logical_type(&bool_types[i]);
+    }
+    duckdb_destroy_logical_type(&struct_type);
+    duckdb_destroy_scalar_function(&fn);
+}
+
+static void register_cigar_metric_function(duckdb_connection connection,
+                                           const char *name,
+                                           uintptr_t metric_id,
+                                           duckdb_type return_type_id) {
+    duckdb_scalar_function fn = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(fn, name);
+
+    duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+    duckdb_logical_type return_type = duckdb_create_logical_type(return_type_id);
+    duckdb_scalar_function_add_parameter(fn, varchar_type);
+    duckdb_scalar_function_set_return_type(fn, return_type);
+    duckdb_scalar_function_set_function(fn, cigar_metric_scalar);
+    duckdb_scalar_function_set_extra_info(fn, (void *)metric_id, NULL);
+
+    duckdb_register_scalar_function(connection, fn);
+
+    duckdb_destroy_logical_type(&varchar_type);
+    duckdb_destroy_logical_type(&return_type);
+    duckdb_destroy_scalar_function(&fn);
+}
+
+static void register_cigar_has_op_function(duckdb_connection connection) {
+    duckdb_scalar_function fn = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(fn, "cigar_has_op");
+
+    duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+    duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
+    duckdb_scalar_function_add_parameter(fn, varchar_type);
+    duckdb_scalar_function_add_parameter(fn, varchar_type);
+    duckdb_scalar_function_set_return_type(fn, bool_type);
+    duckdb_scalar_function_set_function(fn, cigar_has_op_scalar);
+
+    duckdb_register_scalar_function(connection, fn);
+
+    duckdb_destroy_logical_type(&varchar_type);
+    duckdb_destroy_logical_type(&bool_type);
+    duckdb_destroy_scalar_function(&fn);
+}
+
+static void register_seq_kmers_function(duckdb_connection connection) {
+    duckdb_table_function tf = duckdb_create_table_function();
+    duckdb_table_function_set_name(tf, "seq_kmers");
+
+    duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+    duckdb_logical_type bigint_type = duckdb_create_logical_type(DUCKDB_TYPE_BIGINT);
+    duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
+
+    duckdb_table_function_add_parameter(tf, varchar_type);
+    duckdb_table_function_add_parameter(tf, bigint_type);
+    duckdb_table_function_add_named_parameter(tf, "canonical", bool_type);
+
+    duckdb_table_function_set_bind(tf, seq_kmers_bind);
+    duckdb_table_function_set_init(tf, seq_kmers_init);
+    duckdb_table_function_set_function(tf, seq_kmers_function);
+
+    duckdb_register_table_function(connection, tf);
+
+    duckdb_destroy_logical_type(&varchar_type);
+    duckdb_destroy_logical_type(&bigint_type);
+    duckdb_destroy_logical_type(&bool_type);
+    duckdb_destroy_table_function(&tf);
+}
+
+void register_kmer_udf_functions(duckdb_connection connection) {
+    register_seq_revcomp_function(connection);
+    register_seq_canonical_function(connection);
+    register_seq_hash_2bit_function(connection);
+    register_seq_encode_4bit_function(connection);
+    register_seq_decode_4bit_function(connection);
+    register_seq_gc_content_function(connection);
+    register_seq_kmers_function(connection);
+    register_cigar_metric_function(connection, "cigar_has_soft_clip", CIGAR_METRIC_HAS_SOFT_CLIP, DUCKDB_TYPE_BOOLEAN);
+    register_cigar_metric_function(connection, "cigar_has_hard_clip", CIGAR_METRIC_HAS_HARD_CLIP, DUCKDB_TYPE_BOOLEAN);
+    register_cigar_metric_function(connection, "cigar_left_soft_clip", CIGAR_METRIC_LEFT_SOFT_CLIP, DUCKDB_TYPE_BIGINT);
+    register_cigar_metric_function(connection, "cigar_right_soft_clip", CIGAR_METRIC_RIGHT_SOFT_CLIP, DUCKDB_TYPE_BIGINT);
+    register_cigar_metric_function(connection, "cigar_query_length", CIGAR_METRIC_QUERY_LENGTH, DUCKDB_TYPE_BIGINT);
+    register_cigar_metric_function(connection, "cigar_aligned_query_length", CIGAR_METRIC_ALIGNED_QUERY_LENGTH, DUCKDB_TYPE_BIGINT);
+    register_cigar_metric_function(connection, "cigar_reference_length", CIGAR_METRIC_REFERENCE_LENGTH, DUCKDB_TYPE_BIGINT);
+    register_cigar_has_op_function(connection);
+    register_sam_flag_bits_function(connection);
+    register_sam_flag_has_function(connection);
+    register_sam_is_forward_aligned_function(connection);
+    register_sam_flag_predicate_function(connection, "is_paired", SAM_FLAG_PAIRED);
+    register_sam_flag_predicate_function(connection, "is_proper_pair", SAM_FLAG_PROPER_PAIR);
+    register_sam_flag_predicate_function(connection, "is_unmapped", SAM_FLAG_UNMAPPED);
+    register_sam_flag_predicate_function(connection, "is_next_segment_unmapped", SAM_FLAG_MATE_UNMAPPED);
+    register_sam_flag_predicate_function(connection, "is_reverse_complemented", SAM_FLAG_REVERSE);
+    register_sam_flag_predicate_function(connection, "is_next_segment_reverse_complemented", SAM_FLAG_MATE_REVERSE);
+    register_sam_flag_predicate_function(connection, "is_first_segment", SAM_FLAG_READ1);
+    register_sam_flag_predicate_function(connection, "is_last_segment", SAM_FLAG_READ2);
+    register_sam_flag_predicate_function(connection, "is_secondary", SAM_FLAG_SECONDARY);
+    register_sam_flag_predicate_function(connection, "is_qc_fail", SAM_FLAG_QCFAIL);
+    register_sam_flag_predicate_function(connection, "is_duplicate", SAM_FLAG_DUPLICATE);
+    register_sam_flag_predicate_function(connection, "is_supplementary", SAM_FLAG_SUPPLEMENTARY);
+}

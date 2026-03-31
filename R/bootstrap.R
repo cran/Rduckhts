@@ -40,9 +40,20 @@ duckhts_bootstrap <- function(repo_root = NULL) {
     "duckhts.c",
     "bcf_reader.c",
     "bam_reader.c",
+    "bgzip.c",
+    "hts_index_builder.c",
+    "liftover_udf.c",
+    "munge_udf.c",
+    "kmer_udf.c",
+    "interval_udf.c",
     "seq_reader.c",
     "tabix_reader.c",
     "hts_meta_reader.c",
+    "quality_encoding.c",
+    "quality_encoding_reader.c",
+    "bcftools_filter.c",
+    "bcftools_shim.c",
+    "score_udf.c",
     "vep_parser.c"
   )
   file.copy(file.path(src_dir, c_files), dest)
@@ -90,6 +101,23 @@ duckhts_bootstrap <- function(repo_root = NULL) {
     stderr = FALSE
   )
   message("  Copied htslib source tree")
+
+  render_script <- file.path(repo_root, "scripts", "render_function_catalog.py")
+  if (!file.exists(render_script)) {
+    stop("Function catalog renderer not found at: ", render_script, call. = FALSE)
+  }
+  python <- Sys.which("python3")
+  if (!nzchar(python)) {
+    python <- Sys.which("python")
+  }
+  if (!nzchar(python)) {
+    stop("python3/python is required to render the function catalog", call. = FALSE)
+  }
+  render_status <- system2(python, c(render_script, repo_root))
+  if (!identical(render_status, 0L)) {
+    stop("Failed to render generated documentation assets from functions.yaml", call. = FALSE)
+  }
+  message("  Rendered generated documentation assets from functions.yaml")
 
   message("Bootstrap complete. Run 'R CMD build .' to create the tarball.")
   invisible(dest)
@@ -193,9 +221,18 @@ duckhts_build <- function(build_dir = NULL, make = NULL, force = FALSE, verbose 
       "duckhts.c",
       "bcf_reader.c",
       "bam_reader.c",
+      "bgzip.c",
+      "hts_index_builder.c",
+      "liftover_udf.c",
+      "munge_udf.c",
+      "kmer_udf.c",
+      "interval_udf.c",
       "seq_reader.c",
       "tabix_reader.c",
       "hts_meta_reader.c",
+      "quality_encoding.c",
+      "quality_encoding_reader.c",
+      "score_udf.c",
       "vep_parser.c"
     )
   )

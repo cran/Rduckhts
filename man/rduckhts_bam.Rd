@@ -11,8 +11,10 @@ rduckhts_bam(
   region = NULL,
   index_path = NULL,
   reference = NULL,
-  standard_tags = NULL,
-  auxiliary_tags = NULL,
+  standard_tags = FALSE,
+  auxiliary_tags = FALSE,
+  sequence_encoding = NULL,
+  quality_representation = NULL,
   overwrite = FALSE
 )
 }
@@ -29,9 +31,17 @@ rduckhts_bam(
 
 \item{reference}{Optional reference file path for CRAM files}
 
-\item{standard_tags}{Logical. If TRUE, include typed standard SAMtags columns}
+\item{standard_tags}{Logical. If TRUE, include typed standard SAMtags columns. Default FALSE.}
 
-\item{auxiliary_tags}{Logical. If TRUE, include AUXILIARY_TAGS map of non-standard tags}
+\item{auxiliary_tags}{Logical. If TRUE, include AUXILIARY_TAGS map of non-standard tags. Default FALSE.}
+
+\item{sequence_encoding}{Character. Sequence encoding for the SEQ column:
+\code{"string"} (default) returns decoded bases as \code{VARCHAR};
+\code{"nt16"} returns raw htslib nt16 4-bit codes as \code{UTINYINT[]}.}
+
+\item{quality_representation}{Character. Quality representation for the QUAL column:
+\code{"string"} (default) returns canonical Phred+33 text;
+\code{"phred"} returns raw Phred values as \code{UTINYINT[]}.}
 
 \item{overwrite}{Logical. If TRUE, overwrites existing table}
 }

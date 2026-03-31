@@ -8,31 +8,127 @@ expect_true(requireNamespace("Rduckhts", quietly = TRUE))
 expect_true(exists("rduckhts_load"))
 expect_true(exists("rduckhts_bcf"))
 expect_true(exists("rduckhts_bam"))
+expect_true(exists("rduckhts_bam_index"))
+expect_true(exists("rduckhts_bcf_index"))
+expect_true(exists("rduckhts_bgzip"))
+expect_true(exists("rduckhts_bgunzip"))
 expect_true(exists("rduckhts_fasta"))
 expect_true(exists("rduckhts_fasta_index"))
 expect_true(exists("rduckhts_fastq"))
+expect_true(exists("rduckhts_detect_quality_encoding"))
 expect_true(exists("rduckhts_gff"))
 expect_true(exists("rduckhts_gtf"))
 expect_true(exists("rduckhts_tabix"))
+expect_true(exists("rduckhts_tabix_index"))
+expect_true(exists("rduckhts_functions"))
 expect_true(exists("rduckhts_hts_header"))
 expect_true(exists("rduckhts_hts_index"))
 expect_true(exists("rduckhts_hts_index_spans"))
 expect_true(exists("rduckhts_hts_index_raw"))
+expect_true(exists("rduckhts_liftover"))
 
 # Test function signatures
-expect_equal(length(formals(rduckhts_load)), 2)
-expect_equal(length(formals(rduckhts_bcf)), 7)
-expect_equal(length(formals(rduckhts_bam)), 9)
-expect_equal(length(formals(rduckhts_fasta)), 6)
-expect_equal(length(formals(rduckhts_fasta_index)), 3)
-expect_equal(length(formals(rduckhts_fastq)), 6)
-expect_equal(length(formals(rduckhts_gff)), 6)
-expect_equal(length(formals(rduckhts_gtf)), 6)
-expect_equal(length(formals(rduckhts_tabix)), 10)
-expect_equal(length(formals(rduckhts_hts_header)), 4)
-expect_equal(length(formals(rduckhts_hts_index)), 4)
-expect_equal(length(formals(rduckhts_hts_index_spans)), 4)
-expect_equal(length(formals(rduckhts_hts_index_raw)), 4)
+expect_identical(
+  names(formals(rduckhts_load)),
+  c("con", "extension_path")
+)
+expect_identical(
+  names(formals(rduckhts_bcf)),
+  c("con", "table_name", "path", "region", "index_path", "tidy_format",
+    "additional_csq_column_types", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_bam)),
+  c("con", "table_name", "path", "region", "index_path", "reference",
+    "standard_tags", "auxiliary_tags", "sequence_encoding",
+    "quality_representation", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_bam_index)),
+  c("con", "path", "index_path", "min_shift", "threads")
+)
+expect_identical(
+  names(formals(rduckhts_bcf_index)),
+  c("con", "path", "index_path", "min_shift", "threads")
+)
+expect_identical(
+  names(formals(rduckhts_bgzip)),
+  c("con", "path", "output_path", "threads", "level", "keep", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_bgunzip)),
+  c("con", "path", "output_path", "threads", "keep", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_fasta)),
+  c("con", "table_name", "path", "region", "index_path",
+    "sequence_encoding", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_fasta_index)),
+  c("con", "path", "index_path")
+)
+expect_identical(
+  names(formals(rduckhts_fastq)),
+  c("con", "table_name", "path", "mate_path", "interleaved",
+    "sequence_encoding", "quality_representation", "input_quality_encoding",
+    "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_detect_quality_encoding)),
+  c("con", "path", "max_records")
+)
+expect_identical(
+  names(formals(rduckhts_gff)),
+  c("con", "table_name", "path", "region", "index_path", "header",
+    "header_names", "auto_detect", "column_types", "attributes_map", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_gtf)),
+  c("con", "table_name", "path", "region", "index_path", "header",
+    "header_names", "auto_detect", "column_types", "attributes_map", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_tabix)),
+  c("con", "table_name", "path", "region", "index_path", "header",
+    "header_names", "auto_detect", "column_types", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_tabix_index)),
+  c("con", "path", "preset", "index_path", "min_shift", "threads",
+    "seq_col", "start_col", "end_col", "comment_char", "skip_lines")
+)
+expect_identical(
+  names(formals(rduckhts_functions)),
+  c("category", "kind")
+)
+expect_identical(
+  names(formals(rduckhts_hts_header)),
+  c("con", "path", "format", "mode")
+)
+expect_identical(
+  names(formals(rduckhts_hts_index)),
+  c("con", "path", "format", "index_path")
+)
+expect_identical(
+  names(formals(rduckhts_hts_index_spans)),
+  c("con", "path", "format", "index_path")
+)
+expect_identical(
+  names(formals(rduckhts_hts_index_raw)),
+  c("con", "path", "format", "index_path")
+)
+expect_identical(
+  names(formals(rduckhts_liftover)),
+  c("con", "query", "chain_path", "dst_fasta_ref", "chrom_col", "pos_col",
+    "ref_col", "alt_col", "src_fasta_ref", "max_snp_gap", "max_indel_inc",
+    "lift_mt", "end_pos_col", "no_left_align")
+)
+expect_identical(
+  names(formals(rduckhts_munge)),
+  c("con", "query", "fasta_ref", "preset", "column_map", "column_map_file",
+    "iffy_tag", "mismatch_tag", "ns", "nc", "ne")
+)
 
 # Test that DBI is available
 expect_true(requireNamespace("DBI", quietly = TRUE))
@@ -84,24 +180,56 @@ expect_true(any(grepl("\\[", names(mappings$duckdb_to_r)))) # Array types
 # Test example files are bundled
 expect_true(file.exists(system.file("extdata", "ce.fa", package = "Rduckhts")))
 expect_true(file.exists(system.file("extdata", "r1.fq", package = "Rduckhts")))
+expect_true(file.exists(system.file("extdata", "legacy_phred64.fq", package = "Rduckhts")))
 expect_true(file.exists(system.file(
   "extdata",
   "vcf_file.bcf",
   package = "Rduckhts"
 )))
+expect_true(file.exists(system.file(
+  "function_catalog",
+  "functions.tsv",
+  package = "Rduckhts"
+)))
+
+catalog <- rduckhts_functions()
+expect_true(is.data.frame(catalog))
+expect_true(all(c("name", "kind", "category", "signature", "description") %in% names(catalog)))
+expect_true("seq_revcomp" %in% catalog$name)
+expect_true("seq_encode_4bit" %in% catalog$name)
+expect_true("seq_decode_4bit" %in% catalog$name)
+expect_true("cigar_has_soft_clip" %in% catalog$name)
+expect_true("cigar_reference_length" %in% catalog$name)
+expect_true("sam_flag_bits" %in% catalog$name)
+expect_true("read_bcf" %in% catalog$name)
+expect_true("bgzip" %in% catalog$name)
+expect_true("bam_index" %in% catalog$name)
+expect_true("detect_quality_encoding" %in% catalog$name)
+expect_true("bcftools_liftover" %in% catalog$name)
+expect_true("duckdb_liftover" %in% catalog$name)
+expect_equal(unique(rduckhts_functions(kind = "scalar")$kind), "scalar")
+expect_equal(unique(rduckhts_functions(category = "Readers")$category), "Readers")
+expect_equal(unique(rduckhts_functions(category = "CIGAR Utils")$category), "CIGAR Utils")
 
 # Test parameter validation - these should fail gracefully without a connection
 expect_error(rduckhts_bcf(NULL, "test", "nonexistent.vcf"))
 expect_error(rduckhts_bam(NULL, "test", "nonexistent.bam"))
+expect_error(rduckhts_bam_index(NULL, "nonexistent.bam"))
+expect_error(rduckhts_bcf_index(NULL, "nonexistent.vcf.gz"))
+expect_error(rduckhts_bgzip(NULL, "nonexistent.txt"))
+expect_error(rduckhts_bgunzip(NULL, "nonexistent.txt.gz"))
 expect_error(rduckhts_fasta(NULL, "test", "nonexistent.fa"))
 expect_error(rduckhts_fasta_index(NULL, "nonexistent.fa"))
 expect_error(rduckhts_fastq(NULL, "test", "nonexistent.fq"))
+expect_error(rduckhts_detect_quality_encoding(NULL, "nonexistent.fq"))
 expect_error(rduckhts_gff(NULL, "test", "nonexistent.gff"))
 expect_error(rduckhts_gtf(NULL, "test", "nonexistent.gtf"))
 expect_error(rduckhts_tabix(NULL, "test", "nonexistent.bed.gz"))
+expect_error(rduckhts_tabix_index(NULL, "nonexistent.bed.gz"))
 expect_error(rduckhts_hts_header(NULL, "nonexistent.bcf"))
 expect_error(rduckhts_hts_index(NULL, "nonexistent.bcf"))
 expect_error(rduckhts_hts_index_spans(NULL, "nonexistent.bcf"))
 expect_error(rduckhts_hts_index_raw(NULL, "nonexistent.bcf"))
+expect_error(rduckhts_liftover(NULL, "SELECT 1 AS chrom, 1 AS pos", "x.chain", "y.fa"))
 
 message("All basic tests passed!")

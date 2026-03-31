@@ -18,7 +18,6 @@ test_table_creation <- function() {
   bam_path <- system.file("extdata", "range.bam", package = "Rduckhts")
   bam_index_path <- system.file("extdata", "range.bam.bai", package = "Rduckhts")
   fasta_path <- system.file("extdata", "ce.fa", package = "Rduckhts")
-  fasta_index_path <- system.file("extdata", "ce.fa.fai", package = "Rduckhts")
   fastq_r1 <- system.file("extdata", "r1.fq", package = "Rduckhts")
   fastq_r2 <- system.file("extdata", "r2.fq", package = "Rduckhts")
   gff_path <- system.file("extdata", "gff_file.gff.gz", package = "Rduckhts")
@@ -43,7 +42,6 @@ test_table_creation <- function() {
   expect_true(file.exists(bam_path))
   expect_true(file.exists(bam_index_path))
   expect_true(file.exists(fasta_path))
-  expect_true(file.exists(fasta_index_path))
   expect_true(file.exists(fastq_r1))
   expect_true(file.exists(fastq_r2))
   expect_true(file.exists(gff_path))
@@ -52,6 +50,10 @@ test_table_creation <- function() {
   expect_true(file.exists(header_tabix_path))
   expect_true(file.exists(meta_tabix_path))
   expect_true(file.exists(vep_path))
+
+  fasta_index_path <- tempfile("duckhts_fasta_", fileext = ".fai")
+  expect_silent(rduckhts_fasta_index(con, fasta_path, index_path = fasta_index_path))
+  expect_true(file.exists(fasta_index_path))
 
   expect_silent(rduckhts_bcf(con, "variants", bcf_path, overwrite = TRUE))
   expect_silent(rduckhts_bcf(
@@ -80,9 +82,6 @@ test_table_creation <- function() {
     index_path = fasta_index_path,
     overwrite = TRUE
   ))
-  tmp_fai <- tempfile("duckhts_fasta_", fileext = ".fai")
-  expect_silent(rduckhts_fasta_index(con, fasta_path, index_path = tmp_fai))
-  expect_true(file.exists(tmp_fai))
   expect_silent(rduckhts_fastq(
     con,
     "fastq_reads",
@@ -95,6 +94,14 @@ test_table_creation <- function() {
     "annotations",
     gff_path,
     attributes_map = TRUE,
+    overwrite = TRUE
+  ))
+  expect_silent(rduckhts_gff(
+    con,
+    "annotations_idx",
+    gff_path,
+    region = "X:2934816-2935190",
+    index_path = gff_index_path,
     overwrite = TRUE
   ))
   expect_silent(rduckhts_tabix(con, "tabix_data", tabix_path, overwrite = TRUE))
@@ -113,6 +120,8 @@ test_table_creation <- function() {
   expect_true(DBI::dbGetQuery(con, "SELECT count(*) AS n FROM reads_idx")$n[1] == 2)
   expect_true(DBI::dbExistsTable(con, "tabix_idx"))
   expect_true(DBI::dbGetQuery(con, "SELECT count(*) AS n FROM tabix_idx")$n[1] == 4)
+  expect_true(DBI::dbExistsTable(con, "annotations_idx"))
+  expect_true(DBI::dbGetQuery(con, "SELECT count(*) AS n FROM annotations_idx")$n[1] == 4)
   expect_true(DBI::dbExistsTable(con, "sequences_region"))
   expect_true(DBI::dbGetQuery(con, "SELECT count(*) AS n FROM sequences_region")$n[1] == 1)
   expect_true(DBI::dbGetQuery(con, "SELECT length(SEQUENCE) AS n FROM sequences_region")$n[1] == 10)
@@ -235,6 +244,26 @@ test_table_creation <- function() {
       "SELECT VEP_Allele FROM vep_variants LIMIT 1"
     ))
   }
+
+  encoded_roundtrip <- DBI::dbGetQuery(
+    con,
+    paste(
+      "SELECT seq_decode_4bit(seq_encode_4bit('ACGTRYSWKMBDHVN')) AS seq,",
+      "       seq_encode_4bit('ACGU')::VARCHAR AS u_encode,",
+      "       seq_decode_4bit([1::UTINYINT, 0::UTINYINT]) AS eq_decode,",
+      "       seq_encode_4bit('ACG!')::VARCHAR AS unknown_encode,",
+      "       seq_decode_4bit([1::UTINYINT, 16::UTINYINT]) IS NULL AS invalid_decode"
+    )
+  )
+  expect_equal(encoded_roundtrip$seq[1], "ACGTRYSWKMBDHVN")
+  # U (RNA) normalizes to T (code 8)
+  expect_equal(encoded_roundtrip$u_encode[1], "[1, 2, 4, 8]")
+  # code 0 ('=') is valid nt16
+  expect_equal(encoded_roundtrip$eq_decode[1], "A=")
+  # unknown chars map to N (15) — permissive like htslib
+  expect_equal(encoded_roundtrip$unknown_encode[1], "[1, 2, 4, 15]")
+  # out-of-range code (>15) yields NULL
+  expect_true(encoded_roundtrip$invalid_decode[1])
 
   # Test overwrite parameter validation
   if (DBI::dbExistsTable(con, "test_table")) {

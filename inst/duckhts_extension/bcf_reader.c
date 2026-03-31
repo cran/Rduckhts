@@ -93,6 +93,7 @@ typedef struct {
     char* file_path;
     char* index_path;          // Optional explicit index path
     char* region;              // Optional region filter
+    char* additional_csq_column_types;  // Optional bcftools-style override rules
     char** regions;            // Parsed comma-separated regions
     unsigned int n_regions;
     int include_info;          // Include INFO fields
@@ -153,6 +154,7 @@ typedef struct {
     tbx_t* tbx;               // VCF tabix index (TBI)
     hts_itr_t* itr;           // Iterator
     kstring_t kstr;           // String buffer for VCF text parsing
+    kstring_t gt_kstr;        // Thread-local reusable GT formatter buffer
     
     int64_t current_row;
     int done;
@@ -160,6 +162,8 @@ typedef struct {
     // Projection pushdown
     idx_t column_count;
     idx_t* column_ids;
+    int unpack_mask;
+    int need_vep;
     
     // Parallel scan state
     int is_parallel;
@@ -201,6 +205,7 @@ static void destroy_bind_data(void* data) {
     if (bind->file_path) duckdb_free(bind->file_path);
     if (bind->index_path) duckdb_free(bind->index_path);
     if (bind->region) duckdb_free(bind->region);
+    if (bind->additional_csq_column_types) duckdb_free(bind->additional_csq_column_types);
     if (bind->regions) {
         for (unsigned int i = 0; i < bind->n_regions; i++) {
             if (bind->regions[i]) duckdb_free(bind->regions[i]);
@@ -263,6 +268,7 @@ static void destroy_init_data(void* data) {
     if (init->fp) hts_close(init->fp);
     if (init->column_ids) duckdb_free(init->column_ids);
     ks_free(&init->kstr);
+    ks_free(&init->gt_kstr);
     
     duckdb_free(init);
 }
@@ -322,6 +328,59 @@ static void parse_regions_duckdb(const char *region_str, char ***out_regions, un
     duckdb_free(dup);
     *out_regions = arr;
     *out_count = idx;
+}
+
+static int bcf_projection_unpack_mask(const bcf_bind_data_t* bind, const idx_t* column_ids, idx_t column_count) {
+    int mask = 0;
+    if (!bind || !column_ids) {
+        return mask;
+    }
+
+    for (idx_t i = 0; i < column_count; i++) {
+        idx_t col_id = column_ids[i];
+
+        if (col_id == COL_ID || col_id == COL_REF || col_id == COL_ALT) {
+            mask |= BCF_UN_STR;
+            continue;
+        }
+        if (col_id == COL_FILTER) {
+            mask |= BCF_UN_FLT;
+            continue;
+        }
+        if (bind->vep_schema &&
+            col_id >= (idx_t)bind->vep_col_start &&
+            col_id < (idx_t)(bind->vep_col_start + bind->n_vep_fields)) {
+            mask |= BCF_UN_INFO;
+            continue;
+        }
+        if (col_id >= (idx_t)bind->info_col_start &&
+            col_id < (idx_t)(bind->info_col_start + bind->n_info_fields)) {
+            mask |= BCF_UN_INFO;
+            continue;
+        }
+        if (col_id >= (idx_t)bind->format_col_start &&
+            col_id < (idx_t)bind->total_columns) {
+            mask |= BCF_UN_FMT;
+        }
+    }
+
+    return mask;
+}
+
+static int bcf_projection_needs_vep(const bcf_bind_data_t* bind, const idx_t* column_ids, idx_t column_count) {
+    if (!bind || !bind->vep_schema || !column_ids) {
+        return 0;
+    }
+
+    for (idx_t i = 0; i < column_count; i++) {
+        idx_t col_id = column_ids[i];
+        if (col_id >= (idx_t)bind->vep_col_start &&
+            col_id < (idx_t)(bind->vep_col_start + bind->n_vep_fields)) {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 // =============================================================================
@@ -429,6 +488,25 @@ static void bcf_read_bind(duckdb_bind_info info) {
         tidy_format = duckdb_get_bool(tidy_val);
     }
     if (tidy_val) duckdb_destroy_value(&tidy_val);
+
+    // Optional bcftools-style CSQ/ANN/BCSQ type overrides
+    char* additional_csq_column_types = NULL;
+    duckdb_value csq_types_val = duckdb_bind_get_named_parameter(info, "additional_csq_column_types");
+    if (csq_types_val && !duckdb_is_null_value(csq_types_val)) {
+        additional_csq_column_types = duckdb_get_varchar(csq_types_val);
+    }
+    if (csq_types_val) duckdb_destroy_value(&csq_types_val);
+    if (additional_csq_column_types) {
+        char err[256];
+        if (!vep_validate_column_type_rules(additional_csq_column_types, err, sizeof(err))) {
+            duckdb_bind_set_error(info, err);
+            duckdb_free(file_path);
+            if (index_path) duckdb_free(index_path);
+            if (region) duckdb_free(region);
+            duckdb_free(additional_csq_column_types);
+            return;
+        }
+    }
     
     // Open the file to read header
     htsFile* fp = hts_open(file_path, "r");
@@ -439,6 +517,7 @@ static void bcf_read_bind(duckdb_bind_info info) {
         duckdb_free(file_path);
         if (index_path) duckdb_free(index_path);
         if (region) duckdb_free(region);
+        if (additional_csq_column_types) duckdb_free(additional_csq_column_types);
         return;
     }
     
@@ -449,6 +528,7 @@ static void bcf_read_bind(duckdb_bind_info info) {
         duckdb_free(file_path);
         if (index_path) duckdb_free(index_path);
         if (region) duckdb_free(region);
+        if (additional_csq_column_types) duckdb_free(additional_csq_column_types);
         return;
     }
     
@@ -458,6 +538,7 @@ static void bcf_read_bind(duckdb_bind_info info) {
     bind->file_path = file_path;
     bind->index_path = index_path;
     bind->region = region;
+    bind->additional_csq_column_types = additional_csq_column_types;
     parse_regions_duckdb(region, &bind->regions, &bind->n_regions);
     bind->include_info = 1;
     bind->include_format = 1;
@@ -522,7 +603,7 @@ static void bcf_read_bind(duckdb_bind_info info) {
     // -------------------------------------------------------------------------
     // VEP/CSQ/BCSQ/ANN fields (auto-detected)
     // -------------------------------------------------------------------------
-    bind->vep_schema = vep_schema_parse(hdr, NULL);
+    bind->vep_schema = vep_schema_parse(hdr, NULL, bind->additional_csq_column_types);
     if (bind->vep_schema) {
         bind->n_vep_fields = bind->vep_schema->n_fields;
         bind->vep_col_start = col_idx;
@@ -913,6 +994,8 @@ static void bcf_read_local_init(duckdb_init_info info) {
     for (idx_t i = 0; i < local->column_count; i++) {
         local->column_ids[i] = duckdb_init_get_column_index(info, i);
     }
+    local->unpack_mask = bcf_projection_unpack_mask(bind, local->column_ids, local->column_count);
+    local->need_vep = bcf_projection_needs_vep(bind, local->column_ids, local->column_count);
     
     // Store as local init data
     duckdb_init_set_init_data(info, local, destroy_init_data);
@@ -1109,20 +1192,6 @@ static void bcf_read_function(duckdb_function_info info, duckdb_data_chunk outpu
         return;
     }
 
-    // Determine if any VEP columns are requested for this scan
-    int need_vep = (bind->vep_schema != NULL);
-    if (need_vep) {
-        need_vep = 0;
-        for (idx_t i = 0; i < init->column_count; i++) {
-            idx_t col_id = init->column_ids[i];
-            if (col_id >= (idx_t)bind->vep_col_start &&
-                col_id < (idx_t)(bind->vep_col_start + bind->n_vep_fields)) {
-                need_vep = 1;
-                break;
-            }
-        }
-    }
-    
     // For parallel scans, claim first/next contig if needed
     if (init->needs_next_contig) {
         if (!claim_next_contig(init, global)) {
@@ -1292,8 +1361,9 @@ static void bcf_read_function(duckdb_function_info info, duckdb_data_chunk outpu
                 break;
             }
             
-            // Unpack record
-            bcf_unpack(init->rec, BCF_UN_ALL);
+            if (init->unpack_mask) {
+                bcf_unpack(init->rec, init->unpack_mask);
+            }
             
             // For tidy mode, reset sample counter
             if (tidy_mode) {
@@ -1322,7 +1392,7 @@ static void bcf_read_function(duckdb_function_info info, duckdb_data_chunk outpu
 
         // Parse VEP annotation once per record if needed (only on first sample in tidy mode)
         vep_record_t* vep_rec = NULL;
-        if (need_vep && (!tidy_mode || current_sample == 0)) {
+        if (init->need_vep && (!tidy_mode || current_sample == 0)) {
             vep_rec = vep_record_parse_bcf(bind->vep_schema, init->hdr, init->rec);
         }
         
@@ -1866,30 +1936,39 @@ static void bcf_read_function(duckdb_function_info info, duckdb_data_chunk outpu
                             if (ret_gt > 0 && gt_arr) {
                                 int ploidy = ret_gt / bind->n_samples;
                                 int32_t* sample_gt = gt_arr + sample_idx * ploidy;
-                                
-                                // Build GT string (e.g., "0/1", "1|1", "./.")
-                                char gt_str[64];
-                                int pos = 0;
-                                
-                                for (int p = 0; p < ploidy && pos < 60; p++) {
-                                    if (p > 0) {
-                                        // Add separator: '|' for phased, '/' for unphased
-                                        gt_str[pos++] = bcf_gt_is_phased(sample_gt[p]) ? '|' : '/';
-                                    }
-                                    
+
+                                // Build GT string (e.g., "0/1", "1|1", "./.") with a reusable
+                                // thread-local dynamic buffer (no fixed-size truncation).
+                                init->gt_kstr.l = 0;
+                                if (init->gt_kstr.s) init->gt_kstr.s[0] = '\0';
+
+                                for (int p = 0; p < ploidy; p++) {
                                     if (sample_gt[p] == bcf_int32_vector_end) {
                                         break;  // End of genotype
-                                    } else if (bcf_gt_is_missing(sample_gt[p])) {
-                                        gt_str[pos++] = '.';
+                                    }
+                                    if (p > 0) {
+                                        // Add separator: '|' for phased, '/' for unphased
+                                        if (kputc(bcf_gt_is_phased(sample_gt[p]) ? '|' : '/', &init->gt_kstr) < 0) {
+                                            break;
+                                        }
+                                    }
+
+                                    if (bcf_gt_is_missing(sample_gt[p])) {
+                                        if (kputc('.', &init->gt_kstr) < 0) {
+                                            break;
+                                        }
                                     } else {
                                         int allele = bcf_gt_allele(sample_gt[p]);
-                                        pos += snprintf(gt_str + pos, sizeof(gt_str) - pos, "%d", allele);
+                                        if (kputw(allele, &init->gt_kstr) < 0) {
+                                            break;
+                                        }
                                     }
                                 }
-                                gt_str[pos] = '\0';
-                                
-                                if (pos > 0) {
-                                    duckdb_vector_assign_string_element(vec, row_count, gt_str);
+
+                                if (init->gt_kstr.l > 0 && init->gt_kstr.s) {
+                                    duckdb_vector_assign_string_element_len(
+                                        vec, row_count, init->gt_kstr.s, init->gt_kstr.l
+                                    );
                                 } else {
                                     duckdb_vector_ensure_validity_writable(vec);
                                     uint64_t* validity = duckdb_vector_get_validity(vec);
@@ -2008,6 +2087,7 @@ void register_read_bcf_function(duckdb_connection connection) {
     duckdb_table_function_add_named_parameter(tf, "region", varchar_type);  // optional region
     duckdb_table_function_add_named_parameter(tf, "index_path", varchar_type);  // optional explicit index path
     duckdb_table_function_add_named_parameter(tf, "tidy_format", bool_type);  // optional tidy format
+    duckdb_table_function_add_named_parameter(tf, "additional_csq_column_types", varchar_type);  // optional bcftools-style CSQ/ANN/BCSQ type overrides
     duckdb_destroy_logical_type(&varchar_type);
     duckdb_destroy_logical_type(&bool_type);
     
