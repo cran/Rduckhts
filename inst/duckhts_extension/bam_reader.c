@@ -29,6 +29,7 @@ DUCKDB_EXTENSION_EXTERN
 
 #include <htslib/sam.h>
 #include <htslib/hts.h>
+#include <htslib/bgzf.h>
 #include <htslib/kstring.h>
 
 #include "include/seq_encoding.h"
@@ -203,6 +204,7 @@ enum {
     BAM_COL_QUAL,
     BAM_COL_READ_GROUP_ID,
     BAM_COL_SAMPLE_ID,
+    BAM_COL_FILE_OFFSET,
     BAM_COL_CORE_COUNT
 };
 
@@ -569,6 +571,9 @@ static void bam_read_bind(duckdb_bind_info info) {
     }
     duckdb_bind_add_result_column(info, "READ_GROUP_ID", varchar_type);
     duckdb_bind_add_result_column(info, "SAMPLE_ID", varchar_type);
+    duckdb_logical_type ubigint_type = duckdb_create_logical_type(DUCKDB_TYPE_UBIGINT);
+    duckdb_bind_add_result_column(info, "FILE_OFFSET", ubigint_type);
+    duckdb_destroy_logical_type(&ubigint_type);
 
     if (bind->standard_tags) {
         bind->std_col_start = BAM_COL_CORE_COUNT;
@@ -737,28 +742,29 @@ static int claim_next_contig(bam_local_init_data_t *local,
     if (!local->is_parallel || !global || global->n_contigs == 0)
         return 0;
 
-    int next = __sync_fetch_and_add(&global->current_contig, 1);
-    if (next >= global->n_contigs)
-        return 0;  /* all contigs claimed */
-
     /* Destroy previous iterator */
     if (local->itr) {
         hts_itr_destroy(local->itr);
         local->itr = NULL;
     }
 
-    local->assigned_contig = next;
+    for (;;) {
+        int next = __sync_fetch_and_add(&global->current_contig, 1);
+        if (next >= global->n_contigs)
+            return 0;  /* all contigs claimed */
 
-    /* sam_itr_queryi: iterate reads overlapping the entire contig.
-     * tid=next, beg=0, end=HTS_POS_MAX covers the full reference. */
-    local->itr = sam_itr_queryi(local->idx, next, 0, HTS_POS_MAX);
-    if (!local->itr) {
-        /* Contig may have zero aligned reads — skip to next */
-        return claim_next_contig(local, global);
+        local->assigned_contig = next;
+
+        /* sam_itr_queryi: iterate reads overlapping the entire contig.
+         * tid=next, beg=0, end=HTS_POS_MAX covers the full reference. */
+        local->itr = sam_itr_queryi(local->idx, next, 0, HTS_POS_MAX);
+        if (local->itr) {
+            local->needs_next_contig = 0;
+            return 1;
+        }
+
+        /* Contig may have zero indexed reads — try the next claim. */
     }
-
-    local->needs_next_contig = 0;
-    return 1;
 }
 
 /* ================================================================
@@ -800,12 +806,13 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
         if (ret < 0) {
             /* ret == -1: EOF/end-of-region.  ret < -1: error. */
             if (local->is_parallel && ret == -1) {
-                /* Try next contig */
+                /* Try next contig and keep filling this chunk if we can. */
                 local->needs_next_contig = 1;
                 if (!claim_next_contig(local, global)) {
                     local->done = 1;
+                    break;
                 }
-                break;
+                continue;
             }
             local->done = 1;
             break;
@@ -813,6 +820,15 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
 
         bam1_t *b = local->rec;
         int seq_len = b->core.l_qseq;
+
+        /* Capture virtual file offset after reading this record.
+         * For indexed scans, itr->curr_off holds the next read's offset;
+         * for sequential scans, bgzf_tell gives the same.  Either way
+         * the value is monotonically increasing within a thread's stream,
+         * so ORDER BY FILE_OFFSET reproduces BAM file order faithfully. */
+        uint64_t file_offset = (local->fp && local->fp->fp.bgzf)
+            ? (uint64_t)bgzf_tell(local->fp->fp.bgzf)
+            : 0;
 
         /* Grow SEQ/QUAL conversion buffers if needed */
         if (!ensure_seq_buf(local, seq_len)) {
@@ -1001,6 +1017,12 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
                 } else {
                     set_null(vec, row_count);
                 }
+                break;
+            }
+
+            case BAM_COL_FILE_OFFSET: {
+                uint64_t *data = (uint64_t *)duckdb_vector_get_data(vec);
+                data[row_count] = file_offset;
                 break;
             }
 
