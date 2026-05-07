@@ -22,10 +22,22 @@ test_table_creation <- function() {
   fastq_r2 <- system.file("extdata", "r2.fq", package = "Rduckhts")
   gff_path <- system.file("extdata", "gff_file.gff.gz", package = "Rduckhts")
   gff_index_path <- system.file("extdata", "gff_file.gff.gz.tbi", package = "Rduckhts")
+  gff_strict_valid_path <- system.file("extdata", "gff_strict_valid.gff3", package = "Rduckhts")
+  gff_strict_invalid_path <- system.file("extdata", "gff_strict_invalid.gff3", package = "Rduckhts")
+  gff_strict_invalid_attr_path <- system.file("extdata", "gff_strict_invalid_attr.gff3", package = "Rduckhts")
+  gff_strict_extra_field_path <- system.file("extdata", "gff_strict_extra_field.gff3", package = "Rduckhts")
+  gff_strict_invalid_end_path <- system.file("extdata", "gff_strict_invalid_end.gff3", package = "Rduckhts")
+  gff_attrs_path <- system.file("extdata", "gff_attrs.gff3", package = "Rduckhts")
+  gtf_attrs_path <- system.file("extdata", "gtf_attrs.gtf", package = "Rduckhts")
   tabix_path <- system.file("extdata", "rg.sam.gz", package = "Rduckhts")
   header_tabix_path <- system.file(
     "extdata",
     "header_tabix.tsv.gz",
+    package = "Rduckhts"
+  )
+  header_tabix_index_path <- system.file(
+    "extdata",
+    "header_tabix.tsv.gz.tbi",
     package = "Rduckhts"
   )
   meta_tabix_path <- system.file(
@@ -46,8 +58,16 @@ test_table_creation <- function() {
   expect_true(file.exists(fastq_r2))
   expect_true(file.exists(gff_path))
   expect_true(file.exists(gff_index_path))
+  expect_true(file.exists(gff_strict_valid_path))
+  expect_true(file.exists(gff_strict_invalid_path))
+  expect_true(file.exists(gff_strict_invalid_attr_path))
+  expect_true(file.exists(gff_strict_extra_field_path))
+  expect_true(file.exists(gff_strict_invalid_end_path))
+  expect_true(file.exists(gff_attrs_path))
+  expect_true(file.exists(gtf_attrs_path))
   expect_true(file.exists(tabix_path))
   expect_true(file.exists(header_tabix_path))
+  expect_true(file.exists(header_tabix_index_path))
   expect_true(file.exists(meta_tabix_path))
   expect_true(file.exists(vep_path))
 
@@ -104,6 +124,76 @@ test_table_creation <- function() {
     index_path = gff_index_path,
     overwrite = TRUE
   ))
+  expect_silent(rduckhts_gff(
+    con,
+    "annotations_strict",
+    gff_strict_valid_path,
+    strict = TRUE,
+    overwrite = TRUE
+  ))
+  expect_equal(
+    DBI::dbGetQuery(con, "SELECT count(*) AS n, count(start) AS n_start, count(\"end\") AS n_end FROM annotations_strict"),
+    data.frame(n = 3, n_start = 2, n_end = 2)
+  )
+  expect_error(rduckhts_gff(
+    con,
+    "annotations_strict_bad",
+    gff_strict_invalid_path,
+    strict = TRUE,
+    overwrite = TRUE
+  ), pattern = "InvalidCoordinate")
+  expect_error(rduckhts_gff(
+    con,
+    "annotations_strict_bad_attr",
+    gff_strict_invalid_attr_path,
+    strict = TRUE,
+    overwrite = TRUE
+  ), pattern = "InvalidAttribute")
+  expect_error(rduckhts_gff(
+    con,
+    "annotations_strict_extra_field",
+    gff_strict_extra_field_path,
+    strict = TRUE,
+    overwrite = TRUE
+  ), pattern = "TooManyFields")
+  expect_error(rduckhts_gff(
+    con,
+    "annotations_strict_bad_end",
+    gff_strict_invalid_end_path,
+    strict = TRUE,
+    overwrite = TRUE
+  ), pattern = "InvalidCoordinate")
+  expect_silent(rduckhts_gff(
+    con,
+    "annotations_attrs",
+    gff_attrs_path,
+    attributes_list = TRUE,
+    attributes_pairs = TRUE,
+    overwrite = TRUE
+  ))
+  expect_equal(
+    DBI::dbGetQuery(con, paste(
+      "SELECT list_count(map_extract_value(attributes_list, 'Dbxref')) AS n_dbxref,",
+      "list_extract(map_extract_value(attributes_list, 'Note'), 1) AS note,",
+      "list_count(attributes_pairs) AS n_pairs FROM annotations_attrs"
+    )),
+    data.frame(n_dbxref = 2, note = "hello world", n_pairs = 6)
+  )
+  expect_silent(rduckhts_gtf(
+    con,
+    "gtf_attrs",
+    gtf_attrs_path,
+    attributes_list = TRUE,
+    attributes_pairs = TRUE,
+    overwrite = TRUE
+  ))
+  expect_equal(
+    DBI::dbGetQuery(con, paste(
+      "SELECT list_extract(map_extract_value(attributes_list, 'note'), 1) AS note,",
+      "list_count(attributes_pairs) AS n_pairs FROM gtf_attrs"
+    )),
+    data.frame(note = "weird; semi", n_pairs = 3)
+  )
   expect_silent(rduckhts_tabix(con, "tabix_data", tabix_path, overwrite = TRUE))
   expect_silent(rduckhts_tabix(
     con,
@@ -125,6 +215,24 @@ test_table_creation <- function() {
   expect_true(DBI::dbExistsTable(con, "sequences_region"))
   expect_true(DBI::dbGetQuery(con, "SELECT count(*) AS n FROM sequences_region")$n[1] == 1)
   expect_true(DBI::dbGetQuery(con, "SELECT length(SEQUENCE) AS n FROM sequences_region")$n[1] == 10)
+
+  bcf_count_only <- DBI::dbGetQuery(con, sprintf(paste(
+    "SELECT COUNT(*) AS n FROM read_bcf(",
+    "'%s', tidy_format := true, index_path := '%s')"
+  ), bcf_path, bcf_index_path))
+  expect_equal(bcf_count_only$n[1], 30)
+
+  gff_count_only <- DBI::dbGetQuery(con, sprintf(paste(
+    "SELECT COUNT(*) AS n FROM read_gff(",
+    "'%s', index_path := '%s')"
+  ), gff_path, gff_index_path))
+  expect_equal(gff_count_only$n[1], 62)
+
+  tabix_header_count_only <- DBI::dbGetQuery(con, sprintf(paste(
+    "SELECT COUNT(*) AS n FROM read_tabix(",
+    "'%s', header := TRUE, index_path := '%s')"
+  ), header_tabix_path, header_tabix_index_path))
+  expect_equal(tabix_header_count_only$n[1], 2)
 
   header_meta <- rduckhts_hts_header(con, bcf_path)
   expect_true(nrow(header_meta) > 0)

@@ -12,6 +12,10 @@ expect_true(exists("rduckhts_bam_index"))
 expect_true(exists("rduckhts_bcf_index"))
 expect_true(exists("rduckhts_bgzip"))
 expect_true(exists("rduckhts_bgunzip"))
+expect_true(exists("rduckhts_bam_bin_counts"))
+expect_true(exists("rduckhts_bam_bed_coverage"))
+expect_true(exists("rduckhts_mosdepth"))
+expect_true(exists("rduckhts_samtools_idxstats"))
 expect_true(exists("rduckhts_fasta"))
 expect_true(exists("rduckhts_fasta_index"))
 expect_true(exists("rduckhts_fastq"))
@@ -41,7 +45,7 @@ expect_identical(
   names(formals(rduckhts_bam)),
   c("con", "table_name", "path", "region", "index_path", "reference",
     "standard_tags", "auxiliary_tags", "sequence_encoding",
-    "quality_representation", "overwrite")
+    "quality_representation", "decompression_threads", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_bam_index)),
@@ -58,6 +62,28 @@ expect_identical(
 expect_identical(
   names(formals(rduckhts_bgunzip)),
   c("con", "path", "output_path", "threads", "keep", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_bam_bin_counts)),
+  c("con", "path", "bin_width", "chrom", "include_unmapped", "reference", "index_path",
+    "mapq", "require_flags", "exclude_flags", "rmdup", "stats")
+)
+expect_identical(
+  names(formals(rduckhts_bam_bed_coverage)),
+  c("con", "path", "bed_path", "reference", "index_path", "bed_index_path", "mapq",
+    "min_baseq", "min_read_len", "require_flags", "exclude_flags", "min_depth",
+    "max_depth", "decompression_threads", "fragment_mode", "strand_outputs", "processing_threads")
+)
+expect_identical(
+  names(formals(rduckhts_mosdepth)),
+  c("con", "prefix", "path", "chrom", "by", "fasta", "read_groups", "no_per_base",
+    "threads", "processing_threads", "flag", "include_flag", "fast_mode", "fragment_mode", "use_median", "mapq", "min_frag_len",
+    "max_frag_len", "precision_digits", "quantize", "thresholds", "index_path",
+    "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_samtools_idxstats)),
+  c("con", "path", "output", "index_path", "threads", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_fasta)),
@@ -81,12 +107,14 @@ expect_identical(
 expect_identical(
   names(formals(rduckhts_gff)),
   c("con", "table_name", "path", "region", "index_path", "header",
-    "header_names", "auto_detect", "column_types", "attributes_map", "overwrite")
+    "header_names", "auto_detect", "column_types", "attributes_map",
+    "attributes_list", "attributes_pairs", "strict", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_gtf)),
   c("con", "table_name", "path", "region", "index_path", "header",
-    "header_names", "auto_detect", "column_types", "attributes_map", "overwrite")
+    "header_names", "auto_detect", "column_types", "attributes_map",
+    "attributes_list", "attributes_pairs", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_tabix)),
@@ -205,6 +233,10 @@ expect_true("read_bcf" %in% catalog$name)
 expect_true("bgzip" %in% catalog$name)
 expect_true("bam_index" %in% catalog$name)
 expect_true("detect_quality_encoding" %in% catalog$name)
+expect_true("duckhts_cgranges_create" %in% catalog$name)
+expect_true("duckhts_cgranges_has_overlap" %in% catalog$name)
+expect_true("duckhts_cgranges_count_overlaps" %in% catalog$name)
+expect_true("duckhts_cgranges_overlaps" %in% catalog$name)
 expect_true("bcftools_liftover" %in% catalog$name)
 expect_true("duckdb_liftover" %in% catalog$name)
 expect_equal(unique(rduckhts_functions(kind = "scalar")$kind), "scalar")
@@ -214,6 +246,8 @@ expect_equal(unique(rduckhts_functions(category = "CIGAR Utils")$category), "CIG
 # Test parameter validation - these should fail gracefully without a connection
 expect_error(rduckhts_bcf(NULL, "test", "nonexistent.vcf"))
 expect_error(rduckhts_bam(NULL, "test", "nonexistent.bam"))
+expect_error(rduckhts_bam(NULL, "test", "nonexistent.bam", decompression_threads = -1))
+expect_error(rduckhts_bam(NULL, "test", "nonexistent.bam", decompression_threads = 1.5))
 expect_error(rduckhts_bam_index(NULL, "nonexistent.bam"))
 expect_error(rduckhts_bcf_index(NULL, "nonexistent.vcf.gz"))
 expect_error(rduckhts_bgzip(NULL, "nonexistent.txt"))
@@ -231,5 +265,66 @@ expect_error(rduckhts_hts_index(NULL, "nonexistent.bcf"))
 expect_error(rduckhts_hts_index_spans(NULL, "nonexistent.bcf"))
 expect_error(rduckhts_hts_index_raw(NULL, "nonexistent.bcf"))
 expect_error(rduckhts_liftover(NULL, "SELECT 1 AS chrom, 1 AS pos", "x.chain", "y.fa"))
+
+# Test multi-file reading functions exist
+expect_true(exists("rduckhts_bam_multi"))
+expect_true(exists("rduckhts_bcf_multi"))
+expect_true(exists("rduckhts_fastq_multi"))
+expect_true(exists("rduckhts_fasta_multi"))
+expect_true(exists("rduckhts_bed_multi"))
+expect_true(exists("rduckhts_tabix_multi"))
+expect_true(exists("rduckhts_gff_multi"))
+expect_true(exists("rduckhts_gtf_multi"))
+
+# Test multi-file reading function signatures
+expect_identical(
+  names(formals(rduckhts_bam_multi)),
+  c("con", "table_name", "files", "region", "index_path", "reference",
+    "standard_tags", "auxiliary_tags", "sequence_encoding",
+    "quality_representation", "decompression_threads", ".params", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_bcf_multi)),
+  c("con", "table_name", "files", "region", "index_path", "tidy_format",
+    "additional_csq_column_types", ".params", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_fastq_multi)),
+  c("con", "table_name", "files", "mate_path", "interleaved",
+    "sequence_encoding", "quality_representation",
+    "input_quality_encoding", ".params", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_fasta_multi)),
+  c("con", "table_name", "files", "region", "index_path",
+    "sequence_encoding", ".params", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_bed_multi)),
+  c("con", "table_name", "files", "region", "index_path", ".params",
+    "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_tabix_multi)),
+  c("con", "table_name", "files", "region", "index_path", "header",
+    "header_names", "auto_detect", "column_types", ".params", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_gff_multi)),
+  c("con", "table_name", "files", "region", "index_path", "header",
+    "header_names", "auto_detect", "column_types", "attributes_map",
+    "attributes_list", "attributes_pairs", "strict", ".params", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_gtf_multi)),
+  c("con", "table_name", "files", "region", "index_path", "header",
+    "header_names", "auto_detect", "column_types", "attributes_map",
+    "attributes_list", "attributes_pairs", ".params", "overwrite")
+)
+
+# Test .params validation (these should fail with bad input, no connection needed)
+expect_error(rduckhts_bam_multi(NULL, "t", "*.bam", .params = "not a data.frame"))
+expect_error(rduckhts_bam_multi(NULL, "t", "*.bam", .params = data.frame(x = 1)))
+expect_error(rduckhts_bam_multi(NULL, "t", "*.bam", decompression_threads = -1))
 
 message("All basic tests passed!")

@@ -51,10 +51,16 @@ duckhts_bootstrap <- function(repo_root = NULL) {
     "hts_meta_reader.c",
     "quality_encoding.c",
     "quality_encoding_reader.c",
+    "mosdepth_table.c",
+    "bam_bin_counts.c",
+    "samtools_idxstats_table.c",
+    "bam_bed_coverage.c",
+    "cgranges_api.c",
     "bcftools_filter.c",
     "bcftools_shim.c",
     "score_udf.c",
-    "vep_parser.c"
+    "vep_parser.c",
+    "wasm_http_hfile.c"
   )
   file.copy(file.path(src_dir, c_files), dest)
   message("  Copied ", length(c_files), " C source files")
@@ -64,7 +70,13 @@ duckhts_bootstrap <- function(repo_root = NULL) {
   dir.create(inc_dest, showWarnings = FALSE)
   inc_files <- list.files(file.path(src_dir, "include"), full.names = FALSE)
   file.copy(file.path(src_dir, "include", inc_files), inc_dest)
-  message("  Copied ", length(inc_files), " header files")
+  cgranges_dir <- file.path(repo_root, "third_party", "cgranges")
+  file.copy(file.path(cgranges_dir, c("cgranges.h", "khash.h")), inc_dest)
+  message("  Copied ", length(inc_files) + 2L, " header files")
+
+  # Vendored cgranges C source
+  file.copy(file.path(repo_root, "third_party", "cgranges", "cgranges.c"), dest)
+  message("  Copied vendored cgranges source")
 
   # DuckDB C API headers
   capi_dest <- file.path(dest, "duckdb_capi")
@@ -232,8 +244,17 @@ duckhts_build <- function(build_dir = NULL, make = NULL, force = FALSE, verbose 
       "hts_meta_reader.c",
       "quality_encoding.c",
       "quality_encoding_reader.c",
+      "mosdepth_table.c",
+      "bam_bin_counts.c",
+      "samtools_idxstats_table.c",
+      "bam_bed_coverage.c",
+      "cgranges_api.c",
+      "cgranges.c",
+      "bcftools_filter.c",
+      "bcftools_shim.c",
       "score_udf.c",
-      "vep_parser.c"
+      "vep_parser.c",
+      "wasm_http_hfile.c"
     )
   )
   o_files <- file.path(build_dir, sub("\\.c$", ".o", basename(c_files)))
@@ -244,7 +265,7 @@ duckhts_build <- function(build_dir = NULL, make = NULL, force = FALSE, verbose 
   )
 
   for (i in seq_along(c_files)) {
-    cmd <- paste(cc, "-O2 -fPIC", includes, "-c", c_files[i], "-o", o_files[i])
+    cmd <- paste(cc, "-O2 -fPIC -Wpedantic", includes, "-c", c_files[i], "-o", o_files[i])
     if (verbose) {
       message("  ", basename(c_files[i]))
     }

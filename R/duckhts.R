@@ -29,6 +29,20 @@ sql_quote_string <- function(x) {
   sprintf("'%s'", gsub("'", "''", x, fixed = TRUE))
 }
 
+.validate_nonnegative_integer_param <- function(value, name) {
+  if (!is.numeric(value) || length(value) != 1L || is.na(value) ||
+      value < 0 || value > .Machine$integer.max || value != floor(value)) {
+    stop(
+      sprintf(
+        "%s must be a single whole number between 0 and %d",
+        name, .Machine$integer.max
+      ),
+      call. = FALSE
+    )
+  }
+  as.integer(value)
+}
+
 sql_map_literal <- function(x) {
   if (is.null(x) || length(x) == 0) {
     stop("column_map must be non-empty", call. = FALSE)
@@ -648,6 +662,9 @@ rduckhts_bcf <- function(
 #' @param quality_representation Character. Quality representation for the QUAL column:
 #'   \code{"string"} (default) returns canonical Phred+33 text;
 #'   \code{"phred"} returns raw Phred values as \code{UTINYINT[]}.
+#' @param decompression_threads Integer. Number of htslib decompression worker
+#'   threads per file handle. Default \code{2}. Use \code{0} to disable worker
+#'   threads.
 #' @param overwrite Logical. If TRUE, overwrites existing table
 #'
 #' @return Invisible TRUE on success
@@ -675,6 +692,7 @@ rduckhts_bam <- function(
   auxiliary_tags = FALSE,
   sequence_encoding = NULL,
   quality_representation = NULL,
+  decompression_threads = 2,
   overwrite = FALSE
 ) {
   if (!missing(table_name) && !is.null(table_name)) {
@@ -711,6 +729,15 @@ rduckhts_bam <- function(
   }
   if (!is.null(quality_representation)) {
     params$quality_representation <- sprintf("'%s'", quality_representation)
+  }
+  if (!is.null(decompression_threads)) {
+    params$decompression_threads <- sprintf(
+      "%d",
+      .validate_nonnegative_integer_param(
+        decompression_threads,
+        "decompression_threads"
+      )
+    )
   }
 
   param_str <- build_param_str(params)
@@ -1055,6 +1082,238 @@ rduckhts_bgunzip <- function(
   DBI::dbGetQuery(con, query)
 }
 
+#' Native Fixed-Width BAM/CRAM Bin Counts
+#'
+#' Count read starts into fixed-width genomic bins with optional duplicate
+#' handling and optional per-bin GC and MAPQ summary statistics.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded
+#' @param path Path to the input BAM or CRAM file
+#' @param bin_width Positive fixed bin width in bases
+#' @param chrom Optional chromosome name filter
+#' @param include_unmapped Logical. If `TRUE`, append one synthetic row for
+#'   unmapped/no-coordinate records with `chrom = "*"`, and `start`, `end`, and
+#'   `bin_id` set to `NA`.
+#' @param reference Optional reference FASTA path for CRAM input when required,
+#'   and for reference-GC output when `stats` includes `"gc"`
+#' @param index_path Optional explicit BAM/CRAM index path
+#' @param mapq Minimum mapping quality threshold applied after duplicate logic
+#' @param require_flags Required SAM flag mask
+#' @param exclude_flags Excluded SAM flag mask
+#' @param rmdup Duplicate handling mode: `"none"`, `"flag"`, or `"streaming"`
+#' @param stats Optional comma-separated subset of `"gc"` and `"mq"`
+#'
+#' @return A data frame with one row per fixed-width bin across the selected
+#'   contig span, including zero-count bins, plus total, forward, reverse, and
+#'   optional GC/MAPQ summary columns
+#'
+#' @export
+rduckhts_bam_bin_counts <- function(
+  con,
+  path,
+  bin_width,
+  chrom = NULL,
+  include_unmapped = FALSE,
+  reference = NULL,
+  index_path = NULL,
+  mapq = 0,
+  require_flags = 0,
+  exclude_flags = 0,
+  rmdup = "none",
+  stats = NULL
+) {
+  params <- list(
+    mapq = mapq,
+    require_flags = require_flags,
+    exclude_flags = exclude_flags,
+    rmdup = sql_quote_string(rmdup)
+  )
+  if (!is.null(chrom)) params$chrom <- sql_quote_string(chrom)
+  if (isTRUE(include_unmapped)) params$include_unmapped <- "true"
+  if (!is.null(reference)) params$reference <- sql_quote_string(reference)
+  if (!is.null(index_path)) params$index_path <- sql_quote_string(index_path)
+  if (!is.null(stats)) params$stats <- sql_quote_string(stats)
+  param_str <- build_param_str(params)
+  query <- sprintf(
+    "SELECT * FROM bam_bin_counts(%s, %s%s)",
+    sql_quote_string(path),
+    as.character(bin_width),
+    param_str
+  )
+  DBI::dbGetQuery(con, query)
+}
+
+#' Native BAM/CRAM BED Regional Coverage Summary
+#'
+#' Computes samtools coverage-like regional summaries for BAM or CRAM input over
+#' a BED target set, with DuckHTS-specific pre/post-filter and strand-aware
+#' post-filter outputs.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded
+#' @param path Path to the input BAM or CRAM file
+#' @param bed_path Path to the input BED file
+#' @param reference Optional reference FASTA path for CRAM input when required
+#' @param index_path Optional explicit BAM/CRAM index path
+#' @param bed_index_path Optional explicit BED index path (reserved for future use)
+#' @param mapq Minimum mapping quality threshold for post-filter summaries
+#' @param min_baseq Minimum base quality threshold for post-filter base-level summaries
+#' @param min_read_len Minimum read length threshold for post-filter summaries
+#' @param require_flags Required SAM flag mask
+#' @param exclude_flags Excluded SAM flag mask. Defaults to samtools coverage's
+#'   `UNMAP|SECONDARY|QCFAIL|DUP` mask.
+#' @param min_depth Minimum depth threshold for covered-base and mean-depth summaries
+#' @param max_depth Maximum per-position depth cap. Set `0` to remove the cap.
+#' @param decompression_threads Integer. Number of htslib decompression worker
+#'   threads to use for BAM/CRAM input. `0` disables htslib worker threads.
+#' @param fragment_mode Logical. Reserved for future fragment-level semantics.
+#' @param strand_outputs Logical. Emit forward/reverse post-filter summary columns.
+#' @param processing_threads Reserved for future parallel interval processing.
+#'
+#' @return A data frame with one row per BED interval and pre/post regional summaries
+#'
+#' @export
+rduckhts_bam_bed_coverage <- function(
+  con,
+  path,
+  bed_path,
+  reference = NULL,
+  index_path = NULL,
+  bed_index_path = NULL,
+  mapq = 0,
+  min_baseq = 0,
+  min_read_len = 0,
+  require_flags = 0,
+  exclude_flags = 1796,
+  min_depth = 1,
+  max_depth = 1000000,
+  decompression_threads = 0,
+  fragment_mode = FALSE,
+  strand_outputs = TRUE,
+  processing_threads = 0
+) {
+  params <- list(
+    mapq = mapq,
+    min_baseq = min_baseq,
+    min_read_len = min_read_len,
+    require_flags = require_flags,
+    exclude_flags = exclude_flags,
+    min_depth = min_depth,
+    max_depth = max_depth,
+    decompression_threads = .validate_nonnegative_integer_param(
+      decompression_threads,
+      "decompression_threads"
+    ),
+    fragment_mode = if (isTRUE(fragment_mode)) "true" else "false",
+    strand_outputs = if (isTRUE(strand_outputs)) "true" else "false",
+    processing_threads = processing_threads
+  )
+  if (!is.null(reference)) params$reference <- sql_quote_string(reference)
+  if (!is.null(index_path)) params$index_path <- sql_quote_string(index_path)
+  if (!is.null(bed_index_path)) params$bed_index_path <- sql_quote_string(bed_index_path)
+  param_str <- build_param_str(params)
+  query <- sprintf(
+    "SELECT * FROM duckhts_bam_bed_coverage(%s, %s%s)",
+    sql_quote_string(path),
+    sql_quote_string(bed_path),
+    param_str
+  )
+  DBI::dbGetQuery(con, query)
+}
+
+#' Native mosdepth-Compatible Coverage Outputs
+#'
+#' Writes native mosdepth-compatible coverage outputs for indexed BAM or CRAM input.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded
+#' @param prefix Output prefix for the mosdepth-style files
+#' @param path Path to the input BAM or CRAM file
+#' @param chrom Optional chromosome name filter
+#' @param by Optional fixed-width window size as a string or a BED file path
+#' @param fasta Optional reference FASTA path for CRAM input when required
+#' @param read_groups Optional comma-separated read-group IDs, matching mosdepth's `-R`
+#' @param no_per_base Skip writing `\{prefix\}.per-base.bed.gz`
+#' @param threads Number of BAM decompression threads
+#' @param processing_threads Number of parallel contig processing threads (0 = sequential)
+#' @param flag Excluded SAM flag mask, matching mosdepth's `-F`
+#' @param include_flag Required SAM flag mask, matching mosdepth's `-i`
+#' @param fast_mode Logical. If `TRUE`, use mosdepth fast mode. Defaults to
+#'   `FALSE`, matching upstream mosdepth.
+#' @param fragment_mode Logical. If `TRUE`, count full fragment insert spans for
+#'   proper pairs, matching mosdepth's `-a`. Cannot be combined with
+#'   `fast_mode = TRUE`.
+#' @param use_median Logical. If `TRUE`, write `by` region values as medians
+#'   instead of means, matching mosdepth's `-m`.
+#' @param mapq Minimum mapping quality threshold
+#' @param min_frag_len Minimum absolute template length to keep, matching
+#'   mosdepth's `-l`
+#' @param max_frag_len Maximum absolute template length to keep, matching
+#'   mosdepth's `-u`
+#' @param precision_digits Number of decimal places to write in the text outputs
+#' @param quantize Optional mosdepth-style quantize specification such as `":1:4:"`
+#' @param thresholds Optional comma-separated coverage thresholds for `by`, matching mosdepth's `-T`
+#' @param index_path Optional explicit BAM index path
+#' @param overwrite Overwrite existing output files
+#'
+#' @return A data frame describing the written output paths
+#'
+#' @export
+rduckhts_mosdepth <- function(
+  con,
+  prefix,
+  path,
+  chrom = NULL,
+  by = NULL,
+  fasta = NULL,
+  read_groups = NULL,
+  no_per_base = FALSE,
+  threads = 2,
+  processing_threads = 2,
+  flag = 1796,
+  include_flag = 0,
+  fast_mode = FALSE,
+  fragment_mode = FALSE,
+  use_median = FALSE,
+  mapq = 0,
+  min_frag_len = -1,
+  max_frag_len = -1,
+  precision_digits = 2,
+  quantize = NULL,
+  thresholds = NULL,
+  index_path = NULL,
+  overwrite = FALSE
+) {
+  params <- list(
+    no_per_base = if (isTRUE(no_per_base)) "true" else "false",
+    threads = threads,
+    processing_threads = processing_threads,
+    flag = flag,
+    include_flag = include_flag,
+    fast_mode = if (isTRUE(fast_mode)) "true" else "false",
+    fragment_mode = if (isTRUE(fragment_mode)) "true" else "false",
+    use_median = if (isTRUE(use_median)) "true" else "false",
+    mapq = mapq,
+    min_frag_len = min_frag_len,
+    max_frag_len = max_frag_len,
+    precision_digits = precision_digits
+  )
+  if (!is.null(chrom)) params$chrom <- sql_quote_string(chrom)
+  if (!is.null(by)) params$by <- sql_quote_string(by)
+  if (!is.null(fasta)) params$fasta <- sql_quote_string(fasta)
+  if (!is.null(read_groups)) params$read_groups <- sql_quote_string(read_groups)
+  if (!is.null(quantize)) params$quantize <- sql_quote_string(quantize)
+  if (!is.null(thresholds)) params$thresholds <- sql_quote_string(thresholds)
+  if (!is.null(index_path)) params$index_path <- sql_quote_string(index_path)
+  if (isTRUE(overwrite)) params$overwrite <- "true"
+  param_str <- build_param_str(params)
+  query <- sprintf(
+    "SELECT * FROM duckhts_mosdepth(%s, %s%s)",
+    sql_quote_string(prefix),
+    sql_quote_string(path),
+    param_str
+  )
+  DBI::dbGetQuery(con, query)
+}
+
 #' Build BAM or CRAM Index
 #'
 #' Builds a BAM or CRAM index using the DuckHTS extension.
@@ -1079,6 +1338,43 @@ rduckhts_bam_index <- function(
   if (!is.null(index_path)) params$index_path <- sprintf("'%s'", index_path)
   param_str <- build_param_str(params)
   query <- sprintf("SELECT * FROM bam_index('%s'%s)", path, param_str)
+  DBI::dbGetQuery(con, query)
+}
+
+#' samtools idxstats-Compatible Alignment Summary
+#'
+#' Writes samtools idxstats-compatible alignment summary output for BAM, CRAM,
+#' or SAM input.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded
+#' @param path Path to the input alignment file
+#' @param output Optional output path for the written idxstats text file
+#' @param index_path Optional explicit BAM/CRAM index path
+#' @param threads htslib decompression thread count for scan fallback
+#' @param overwrite Overwrite an existing output file
+#'
+#' @return A data frame with `success`, `path`, `output_path`,
+#'   `used_index_fast_path`, and `error_message`
+#'
+#' @export
+rduckhts_samtools_idxstats <- function(
+  con,
+  path,
+  output = NULL,
+  index_path = NULL,
+  threads = 0,
+  overwrite = FALSE
+) {
+  params <- list(threads = threads)
+  if (!is.null(output)) params$output <- sql_quote_string(output)
+  if (!is.null(index_path)) params$index_path <- sql_quote_string(index_path)
+  if (isTRUE(overwrite)) params$overwrite <- "true"
+  param_str <- build_param_str(params)
+  query <- sprintf(
+    "SELECT * FROM duckhts_samtools_idxstats(%s%s)",
+    sql_quote_string(path),
+    param_str
+  )
   DBI::dbGetQuery(con, query)
 }
 
@@ -1277,7 +1573,10 @@ rduckhts_detect_quality_encoding <- function(con, path, max_records = 10000) {
 #' @param header_names Character vector to override column names
 #' @param auto_detect Logical. If TRUE, infer basic numeric column types
 #' @param column_types Character vector of column types (e.g. "BIGINT", "VARCHAR")
-#' @param attributes_map Logical. If TRUE, returns attributes as a MAP column
+#' @param attributes_map Logical. If TRUE, returns raw attributes as a scalar MAP column
+#' @param attributes_list Logical. If TRUE, returns attributes as MAP(VARCHAR, VARCHAR[])
+#' @param attributes_pairs Logical. If TRUE, returns attributes as a LIST of key/value/index structs
+#' @param strict Logical. If TRUE, enforce GFF3 structural validation while scanning
 #' @param overwrite Logical. If TRUE, overwrites existing table
 #'
 #' @return Invisible TRUE on success
@@ -1294,6 +1593,9 @@ rduckhts_gff <- function(
   auto_detect = NULL,
   column_types = NULL,
   attributes_map = FALSE,
+  attributes_list = FALSE,
+  attributes_pairs = FALSE,
+  strict = FALSE,
   overwrite = FALSE
 ) {
   if (!missing(table_name) && !is.null(table_name)) {
@@ -1343,6 +1645,15 @@ rduckhts_gff <- function(
   }
   if (attributes_map) {
     params$attributes_map <- "true"
+  }
+  if (attributes_list) {
+    params$attributes_list <- "true"
+  }
+  if (attributes_pairs) {
+    params$attributes_pairs <- "true"
+  }
+  if (strict) {
+    params$strict <- "true"
   }
 
   param_str <- build_param_str(params)
@@ -1379,7 +1690,9 @@ rduckhts_gff <- function(
 #' @param header_names Character vector to override column names
 #' @param auto_detect Logical. If TRUE, infer basic numeric column types
 #' @param column_types Character vector of column types (e.g. "BIGINT", "VARCHAR")
-#' @param attributes_map Logical. If TRUE, returns attributes as a MAP column
+#' @param attributes_map Logical. If TRUE, returns raw attributes as a scalar MAP column
+#' @param attributes_list Logical. If TRUE, returns attributes as MAP(VARCHAR, VARCHAR[])
+#' @param attributes_pairs Logical. If TRUE, returns attributes as a LIST of key/value/index structs
 #' @param overwrite Logical. If TRUE, overwrites existing table
 #'
 #' @return Invisible TRUE on success
@@ -1396,6 +1709,8 @@ rduckhts_gtf <- function(
   auto_detect = NULL,
   column_types = NULL,
   attributes_map = FALSE,
+  attributes_list = FALSE,
+  attributes_pairs = FALSE,
   overwrite = FALSE
 ) {
   if (!missing(table_name) && !is.null(table_name)) {
@@ -1445,6 +1760,12 @@ rduckhts_gtf <- function(
   }
   if (attributes_map) {
     params$attributes_map <- "true"
+  }
+  if (attributes_list) {
+    params$attributes_list <- "true"
+  }
+  if (attributes_pairs) {
+    params$attributes_pairs <- "true"
   }
 
   param_str <- build_param_str(params)
@@ -1843,16 +2164,22 @@ rduckhts_munge <- function(
 #' Compute Polygenic Scores
 #'
 #' Calls the DuckHTS `bcftools_score(...)` table function to compute sample-level
-#' polygenic scores from one genotype VCF/BCF file and one summary-statistics file.
+#' polygenic scores from one genotype VCF/BCF file and one or more summary-statistics files.
 #'
 #' @param con A DuckDB connection with DuckHTS loaded
 #' @param bcf_path Path to genotype VCF/BCF file
-#' @param summary_path Path to summary-statistics file
+#' @param summary_path Path(s) to summary-statistics file(s). A character vector
+#'   computes multiple TSV/SSF PRS columns in one genotype scan. Use `NULL`
+#'   with `summaries_list_file` to read paths from a file.
 #' @param use Optional dosage source (`"GT"`, `"DS"`, `"HDS"`, `"AP"`, `"GP"`, `"AS"`)
 #' @param columns Optional summary preset (`"PLINK"`, `"PLINK2"`, `"REGENIE"`, `"SAIGE"`,
 #'   `"BOLT"`, `"METAL"`, `"PGS"`, `"SSF"`, `"GWAS-SSF"`)
 #' @param columns_file Optional two-column summary header mapping file
 #' @param q_score_thr Optional comma-separated p-value thresholds (e.g. `"1e-8,1e-6,1e-4"`)
+#' @param summaries_list_file Optional path to a file (one summary path per line)
+#'   or directory of summary files, matching upstream `bcftools +score --summaries`.
+#' @param log_path Optional path for a matching/audit log with loaded, matched,
+#'   allele-mismatch, and duplicate-marker counts per PRS.
 #' @param use_variant_id Logical; if TRUE, match variants by ID instead of CHR+BP
 #' @param counts Logical; if TRUE, include per-threshold matched-variant counts
 #' @param samples Optional comma-separated list of sample names to subset (e.g. `"SAMP1,SAMP2"`)
@@ -1873,11 +2200,13 @@ rduckhts_munge <- function(
 rduckhts_score <- function(
   con,
   bcf_path,
-  summary_path,
+  summary_path = NULL,
   use = NULL,
   columns = "PLINK",
   columns_file = NULL,
   q_score_thr = NULL,
+  summaries_list_file = NULL,
+  log_path = NULL,
   use_variant_id = FALSE,
   counts = FALSE,
   samples = NULL,
@@ -1904,14 +2233,35 @@ rduckhts_score <- function(
       stop("columns must be one of PLINK, PLINK2, REGENIE, SAIGE, BOLT, METAL, PGS, SSF, GWAS-SSF", call. = FALSE)
     }
   }
+  if (is.null(summary_path) && is.null(summaries_list_file)) {
+    stop("summary_path or summaries_list_file must be supplied", call. = FALSE)
+  }
+  if (!is.null(summary_path) && !is.character(summary_path)) {
+    stop("summary_path must be a character vector or NULL", call. = FALSE)
+  }
+  if (!is.null(summary_path) && !length(summary_path)) {
+    stop("summary_path must not be empty", call. = FALSE)
+  }
+  if (!is.null(summary_path) && anyNA(summary_path)) {
+    stop("summary_path must not contain NA", call. = FALSE)
+  }
+  summary_sql <- if (is.null(summary_path)) {
+    "NULL"
+  } else if (length(summary_path) == 1L) {
+    sql_quote_string(summary_path)
+  } else {
+    sprintf("[%s]", paste(sql_quote_string(summary_path), collapse = ", "))
+  }
   params <- list(
     sql_quote_string(bcf_path),
-    sql_quote_string(summary_path)
+    summary_sql
   )
   if (!is.null(use)) params <- c(params, sprintf("use := '%s'", use))
   if (!is.null(columns)) params <- c(params, sprintf("columns := '%s'", columns))
-  if (!is.null(columns_file)) params <- c(params, sprintf("columns_file := '%s'", columns_file))
+  if (!is.null(columns_file)) params <- c(params, sprintf("columns_file := %s", sql_quote_string(columns_file)))
   if (!is.null(q_score_thr)) params <- c(params, sprintf("q_score_thr := '%s'", q_score_thr))
+  if (!is.null(summaries_list_file)) params <- c(params, sprintf("summaries_list_file := %s", sql_quote_string(summaries_list_file)))
+  if (!is.null(log_path)) params <- c(params, sprintf("log_path := %s", sql_quote_string(log_path)))
   if (!is.null(samples)) params <- c(params, sprintf("samples := '%s'", samples))
   if (!is.null(regions)) params <- c(params, sprintf("regions := '%s'", regions))
   if (!is.null(regions_file)) params <- c(params, sprintf("regions_file := '%s'", regions_file))
@@ -1930,4 +2280,432 @@ rduckhts_score <- function(
   )
   sql <- sprintf("SELECT * FROM bcftools_score(%s)", paste(params, collapse = ", "))
   DBI::dbGetQuery(con, sql)
+}
+
+# --------------------------------------------------------------------------
+# Multi-file reading helpers (internal)
+# --------------------------------------------------------------------------
+
+.format_hts_param <- function(name, value) {
+  if (identical(name, "decompression_threads")) {
+    value <- .validate_nonnegative_integer_param(value, name)
+    return(sprintf("%s := %d", name, value))
+  }
+
+  if (is.logical(value)) {
+    return(sprintf("%s := %s", name, if (isTRUE(value)) "true" else "false"))
+  }
+  if (is.numeric(value)) {
+    return(sprintf("%s := %s", name, value))
+  }
+  if (is.character(value) && length(value) > 1) {
+    # LIST literal
+    items <- paste(sql_quote_string(value), collapse = ", ")
+    return(sprintf("%s := [%s]", name, items))
+  }
+  if (is.character(value) && length(value) == 1) {
+    return(sprintf("%s := %s", name, sql_quote_string(value)))
+  }
+  stop(sprintf("Unsupported parameter type for '%s': %s", name, class(value)[1]),
+       call. = FALSE)
+}
+
+.build_hts_arm <- function(reader, file, params) {
+  # params is a named list of already-validated non-NULL values
+  param_parts <- character(0)
+  if (length(params) > 0) {
+    param_parts <- vapply(names(params), function(nm) {
+      .format_hts_param(nm, params[[nm]])
+    }, character(1))
+  }
+  param_str <- if (length(param_parts) > 0) {
+    paste0(", ", paste(param_parts, collapse = ", "))
+  } else {
+    ""
+  }
+  quoted_file <- sql_quote_string(file)
+  sprintf("SELECT %s AS filename, t.* FROM %s(%s%s) t",
+          quoted_file, reader, quoted_file, param_str)
+}
+
+.expand_hts_files <- function(con, files) {
+  # Use DuckDB glob() to expand each pattern (works with local and S3 paths)
+  all_files <- character(0)
+  for (pattern in files) {
+    sql <- sprintf("SELECT file FROM glob(%s) g(file)", sql_quote_string(pattern))
+    res <- DBI::dbGetQuery(con, sql)
+    if (nrow(res) == 0) {
+      warning(sprintf("Pattern '%s' matched no files", pattern), call. = FALSE)
+    } else {
+      all_files <- c(all_files, res$file)
+    }
+  }
+  if (length(all_files) == 0) {
+    stop("No files matched any of the supplied patterns", call. = FALSE)
+  }
+  unique(all_files)
+}
+
+.hts_multi_read <- function(con, table_name, reader, files, uniform_params,
+                            .params, overwrite) {
+  # Table guard — same pattern as rduckhts_bam, rduckhts_bcf, etc.
+  if (!missing(table_name) && !is.null(table_name)) {
+    if (DBI::dbExistsTable(con, table_name) && !overwrite) {
+      stop(
+        "Table '", table_name,
+        "' already exists. Use overwrite = TRUE to replace it."
+      )
+    }
+    if (DBI::dbExistsTable(con, table_name)) {
+      DBI::dbRemoveTable(con, table_name)
+    }
+  }
+
+  # Validate .params
+  if (!is.null(.params)) {
+    if (!is.data.frame(.params)) {
+      stop(".params must be a data.frame or NULL", call. = FALSE)
+    }
+    if (!"file" %in% names(.params)) {
+      stop(".params must contain a 'file' column", call. = FALSE)
+    }
+  }
+
+  if (!is.null(.params)) {
+    # Per-file mode: each row of .params specifies a file and optional overrides
+    expanded <- character(0)
+    row_map <- list()
+    for (i in seq_len(nrow(.params))) {
+      pat <- .params$file[i]
+      row_files <- .expand_hts_files(con, pat)
+      for (f in row_files) {
+        expanded <- c(expanded, f)
+        row_map[[f]] <- i
+      }
+    }
+    if (length(expanded) == 0) {
+      stop("No files matched any patterns in .params$file", call. = FALSE)
+    }
+    override_cols <- setdiff(names(.params), "file")
+    arms <- vapply(expanded, function(f) {
+      row_idx <- row_map[[f]]
+      merged <- uniform_params
+      for (col in override_cols) {
+        val <- .params[[col]][row_idx]
+        if (!is.na(val) && !is.null(val)) {
+          merged[[col]] <- val
+        }
+      }
+      .build_hts_arm(reader, f, merged)
+    }, character(1), USE.NAMES = FALSE)
+  } else {
+    # Uniform mode: expand all globs and apply same params
+    expanded <- .expand_hts_files(con, files)
+    arms <- vapply(expanded, function(f) {
+      .build_hts_arm(reader, f, uniform_params)
+    }, character(1), USE.NAMES = FALSE)
+  }
+
+  union_sql <- paste(arms, collapse = " UNION ALL BY NAME ")
+  create_sql <- sprintf("CREATE TABLE %s AS %s", table_name, union_sql)
+  DBI::dbExecute(con, create_sql)
+  invisible(TRUE)
+}
+
+# --------------------------------------------------------------------------
+# Multi-file reading wrappers (exported)
+# --------------------------------------------------------------------------
+
+#' Read multiple BAM/SAM files into a DuckDB table
+#'
+#' Read and combine multiple BAM/SAM files via UNION ALL BY NAME,
+#' materialising the result as a DuckDB table.
+#' Each row includes a \code{filename} column identifying its source file.
+#'
+#' @param con A DBI connection to DuckDB with the duckhts extension loaded.
+#' @param table_name Name of the DuckDB table to create.
+#' @param files Character vector of file paths or glob patterns.
+#' @param region Optional region string (e.g. \code{"chr1:1-1000"}).
+#' @param index_path Optional index file path.
+#' @param reference Optional reference FASTA path (for CRAM).
+#' @param standard_tags Logical; include standard SAM tag columns.
+#' @param auxiliary_tags Logical; include auxiliary tag map column.
+#' @param sequence_encoding Optional sequence encoding (e.g. \code{"twoBit"}).
+#' @param quality_representation Optional quality representation.
+#' @param decompression_threads Integer. Number of htslib decompression worker
+#'   threads per file handle. Default \code{2}. Use \code{0} to disable worker
+#'   threads.
+#' @param .params Optional data.frame with per-file parameter overrides.
+#'   Must contain a \code{file} column; other columns override uniform parameters.
+#'   \code{NA} values use the uniform default.
+#' @param overwrite Logical; if \code{TRUE}, replace an existing table.
+#' @return Invisible \code{TRUE} on success.
+#' @export
+rduckhts_bam_multi <- function(con, table_name, files, region = NULL,
+                               index_path = NULL, reference = NULL,
+                               standard_tags = FALSE, auxiliary_tags = FALSE,
+                               sequence_encoding = NULL,
+                               quality_representation = NULL,
+                               decompression_threads = 2,
+                               .params = NULL, overwrite = FALSE) {
+  params <- list()
+  if (!is.null(region)) params$region <- region
+  if (!is.null(index_path)) params$index_path <- index_path
+  if (!is.null(reference)) params$reference <- reference
+  params$standard_tags <- standard_tags
+  params$auxiliary_tags <- auxiliary_tags
+  if (!is.null(sequence_encoding)) params$sequence_encoding <- sequence_encoding
+  if (!is.null(quality_representation)) params$quality_representation <- quality_representation
+  if (!is.null(decompression_threads)) params$decompression_threads <- decompression_threads
+  .hts_multi_read(con, table_name, "read_bam", files, params, .params, overwrite)
+}
+
+#' Read multiple VCF/BCF files into a DuckDB table
+#'
+#' Read and combine multiple VCF/BCF files via UNION ALL BY NAME,
+#' materialising the result as a DuckDB table.
+#' Each row includes a \code{filename} column identifying its source file.
+#'
+#' @param con A DBI connection to DuckDB with the duckhts extension loaded.
+#' @param table_name Name of the DuckDB table to create.
+#' @param files Character vector of file paths or glob patterns.
+#' @param region Optional region string.
+#' @param index_path Optional index file path.
+#' @param tidy_format Logical; use tidy FORMAT column output.
+#' @param additional_csq_column_types Optional CSQ type override string.
+#' @param .params Optional data.frame with per-file parameter overrides.
+#' @param overwrite Logical; if \code{TRUE}, replace an existing table.
+#' @return Invisible \code{TRUE} on success.
+#' @export
+rduckhts_bcf_multi <- function(con, table_name, files, region = NULL,
+                               index_path = NULL, tidy_format = FALSE,
+                               additional_csq_column_types = NULL,
+                               .params = NULL, overwrite = FALSE) {
+  params <- list()
+  if (!is.null(region)) params$region <- region
+  if (!is.null(index_path)) params$index_path <- index_path
+  if (isTRUE(tidy_format)) params$tidy_format <- TRUE
+  if (!is.null(additional_csq_column_types)) {
+    params$additional_csq_column_types <- additional_csq_column_types
+  }
+  .hts_multi_read(con, table_name, "read_bcf", files, params, .params, overwrite)
+}
+
+#' Read multiple FASTQ files into a DuckDB table
+#'
+#' Read and combine multiple FASTQ files via UNION ALL BY NAME,
+#' materialising the result as a DuckDB table.
+#' Each row includes a \code{filename} column identifying its source file.
+#'
+#' @param con A DBI connection to DuckDB with the duckhts extension loaded.
+#' @param table_name Name of the DuckDB table to create.
+#' @param files Character vector of file paths or glob patterns.
+#' @param mate_path Optional mate file path (for paired-end).
+#' @param interleaved Logical; TRUE if file contains interleaved paired reads.
+#' @param sequence_encoding Optional sequence encoding.
+#' @param quality_representation Optional quality representation.
+#' @param input_quality_encoding Optional input quality encoding override.
+#' @param .params Optional data.frame with per-file parameter overrides.
+#' @param overwrite Logical; if \code{TRUE}, replace an existing table.
+#' @return Invisible \code{TRUE} on success.
+#' @export
+rduckhts_fastq_multi <- function(con, table_name, files, mate_path = NULL,
+                                 interleaved = FALSE, sequence_encoding = NULL,
+                                 quality_representation = NULL,
+                                 input_quality_encoding = NULL,
+                                 .params = NULL, overwrite = FALSE) {
+  params <- list()
+  if (!is.null(mate_path)) params$mate_path <- mate_path
+  if (isTRUE(interleaved)) params$interleaved <- TRUE
+  if (!is.null(sequence_encoding)) params$sequence_encoding <- sequence_encoding
+  if (!is.null(quality_representation)) params$quality_representation <- quality_representation
+  if (!is.null(input_quality_encoding)) params$input_quality_encoding <- input_quality_encoding
+  .hts_multi_read(con, table_name, "read_fastq", files, params, .params, overwrite)
+}
+
+#' Read multiple FASTA files into a DuckDB table
+#'
+#' Read and combine multiple FASTA files via UNION ALL BY NAME,
+#' materialising the result as a DuckDB table.
+#' Each row includes a \code{filename} column identifying its source file.
+#'
+#' @param con A DBI connection to DuckDB with the duckhts extension loaded.
+#' @param table_name Name of the DuckDB table to create.
+#' @param files Character vector of file paths or glob patterns.
+#' @param region Optional region string.
+#' @param index_path Optional index file path.
+#' @param sequence_encoding Optional sequence encoding.
+#' @param .params Optional data.frame with per-file parameter overrides.
+#' @param overwrite Logical; if \code{TRUE}, replace an existing table.
+#' @return Invisible \code{TRUE} on success.
+#' @export
+rduckhts_fasta_multi <- function(con, table_name, files, region = NULL,
+                                 index_path = NULL, sequence_encoding = NULL,
+                                 .params = NULL, overwrite = FALSE) {
+  params <- list()
+  if (!is.null(region)) params$region <- region
+  if (!is.null(index_path)) params$index_path <- index_path
+  if (!is.null(sequence_encoding)) params$sequence_encoding <- sequence_encoding
+  .hts_multi_read(con, table_name, "read_fasta", files, params, .params, overwrite)
+}
+
+#' Read multiple BED files into a DuckDB table
+#'
+#' Read and combine multiple BED files via UNION ALL BY NAME,
+#' materialising the result as a DuckDB table.
+#' Each row includes a \code{filename} column identifying its source file.
+#'
+#' @param con A DBI connection to DuckDB with the duckhts extension loaded.
+#' @param table_name Name of the DuckDB table to create.
+#' @param files Character vector of file paths or glob patterns.
+#' @param region Optional region string.
+#' @param index_path Optional index file path.
+#' @param .params Optional data.frame with per-file parameter overrides.
+#' @param overwrite Logical; if \code{TRUE}, replace an existing table.
+#' @return Invisible \code{TRUE} on success.
+#' @export
+rduckhts_bed_multi <- function(con, table_name, files, region = NULL,
+                               index_path = NULL, .params = NULL,
+                               overwrite = FALSE) {
+  params <- list()
+  if (!is.null(region)) params$region <- region
+  if (!is.null(index_path)) params$index_path <- index_path
+  .hts_multi_read(con, table_name, "read_bed", files, params, .params, overwrite)
+}
+
+#' Read multiple tabix-indexed files into a DuckDB table
+#'
+#' Read and combine multiple tabix-indexed files via UNION ALL BY NAME,
+#' materialising the result as a DuckDB table.
+#' Each row includes a \code{filename} column identifying its source file.
+#'
+#' @param con A DBI connection to DuckDB with the duckhts extension loaded.
+#' @param table_name Name of the DuckDB table to create.
+#' @param files Character vector of file paths or glob patterns.
+#' @param region Optional region string.
+#' @param index_path Optional index file path.
+#' @param header Logical or NULL; whether the file has a header line.
+#' @param header_names Character vector of column names.
+#' @param auto_detect Logical or NULL; enable type auto-detection.
+#' @param column_types Character vector of column type names.
+#' @param .params Optional data.frame with per-file parameter overrides.
+#' @param overwrite Logical; if \code{TRUE}, replace an existing table.
+#' @return Invisible \code{TRUE} on success.
+#' @export
+rduckhts_tabix_multi <- function(con, table_name, files, region = NULL,
+                                 index_path = NULL, header = NULL,
+                                 header_names = NULL, auto_detect = NULL,
+                                 column_types = NULL, .params = NULL,
+                                 overwrite = FALSE) {
+  params <- list()
+  if (!is.null(region)) params$region <- region
+  if (!is.null(index_path)) params$index_path <- index_path
+  if (!is.null(header)) params$header <- isTRUE(header)
+  if (!is.null(auto_detect)) params$auto_detect <- isTRUE(auto_detect)
+  if (!is.null(header_names)) {
+    if (!is.character(header_names)) stop("header_names must be a character vector", call. = FALSE)
+    params$header_names <- header_names
+  }
+  if (!is.null(column_types)) {
+    if (!is.character(column_types)) stop("column_types must be a character vector", call. = FALSE)
+    params$column_types <- normalize_tabix_types(column_types)
+  }
+  .hts_multi_read(con, table_name, "read_tabix", files, params, .params, overwrite)
+}
+
+#' Read multiple GFF files into a DuckDB table
+#'
+#' Read and combine multiple GFF3 files via UNION ALL BY NAME,
+#' materialising the result as a DuckDB table.
+#' Each row includes a \code{filename} column identifying its source file.
+#'
+#' @param con A DBI connection to DuckDB with the duckhts extension loaded.
+#' @param table_name Name of the DuckDB table to create.
+#' @param files Character vector of file paths or glob patterns.
+#' @param region Optional region string.
+#' @param index_path Optional index file path.
+#' @param header Logical or NULL; whether the file has a header line.
+#' @param header_names Character vector of column names.
+#' @param auto_detect Logical or NULL; enable type auto-detection.
+#' @param column_types Character vector of column type names.
+#' @param attributes_map Logical; return raw attributes as a scalar MAP.
+#' @param attributes_list Logical; return attributes as MAP(VARCHAR, VARCHAR[]).
+#' @param attributes_pairs Logical; return attributes as a LIST of key/value/index structs.
+#' @param strict Logical; enforce GFF3 structural validation while scanning.
+#' @param .params Optional data.frame with per-file parameter overrides.
+#' @param overwrite Logical; if \code{TRUE}, replace an existing table.
+#' @return Invisible \code{TRUE} on success.
+#' @export
+rduckhts_gff_multi <- function(con, table_name, files, region = NULL,
+                               index_path = NULL, header = NULL,
+                               header_names = NULL, auto_detect = NULL,
+                               column_types = NULL, attributes_map = FALSE,
+                               attributes_list = FALSE, attributes_pairs = FALSE,
+                               strict = FALSE,
+                               .params = NULL, overwrite = FALSE) {
+  params <- list()
+  if (!is.null(region)) params$region <- region
+  if (!is.null(index_path)) params$index_path <- index_path
+  if (!is.null(header)) params$header <- isTRUE(header)
+  if (!is.null(auto_detect)) params$auto_detect <- isTRUE(auto_detect)
+  if (!is.null(header_names)) {
+    if (!is.character(header_names)) stop("header_names must be a character vector", call. = FALSE)
+    params$header_names <- header_names
+  }
+  if (!is.null(column_types)) {
+    if (!is.character(column_types)) stop("column_types must be a character vector", call. = FALSE)
+    params$column_types <- normalize_tabix_types(column_types)
+  }
+  if (isTRUE(attributes_map)) params$attributes_map <- TRUE
+  if (isTRUE(attributes_list)) params$attributes_list <- TRUE
+  if (isTRUE(attributes_pairs)) params$attributes_pairs <- TRUE
+  if (isTRUE(strict)) params$strict <- TRUE
+  .hts_multi_read(con, table_name, "read_gff", files, params, .params, overwrite)
+}
+
+#' Read multiple GTF files into a DuckDB table
+#'
+#' Read and combine multiple GTF files via UNION ALL BY NAME,
+#' materialising the result as a DuckDB table.
+#' Each row includes a \code{filename} column identifying its source file.
+#'
+#' @param con A DBI connection to DuckDB with the duckhts extension loaded.
+#' @param table_name Name of the DuckDB table to create.
+#' @param files Character vector of file paths or glob patterns.
+#' @param region Optional region string.
+#' @param index_path Optional index file path.
+#' @param header Logical or NULL; whether the file has a header line.
+#' @param header_names Character vector of column names.
+#' @param auto_detect Logical or NULL; enable type auto-detection.
+#' @param column_types Character vector of column type names.
+#' @param attributes_map Logical; return raw attributes as a scalar MAP.
+#' @param attributes_list Logical; return attributes as MAP(VARCHAR, VARCHAR[]).
+#' @param attributes_pairs Logical; return attributes as a LIST of key/value/index structs.
+#' @param .params Optional data.frame with per-file parameter overrides.
+#' @param overwrite Logical; if \code{TRUE}, replace an existing table.
+#' @return Invisible \code{TRUE} on success.
+#' @export
+rduckhts_gtf_multi <- function(con, table_name, files, region = NULL,
+                               index_path = NULL, header = NULL,
+                               header_names = NULL, auto_detect = NULL,
+                               column_types = NULL, attributes_map = FALSE,
+                               attributes_list = FALSE, attributes_pairs = FALSE,
+                               .params = NULL, overwrite = FALSE) {
+  params <- list()
+  if (!is.null(region)) params$region <- region
+  if (!is.null(index_path)) params$index_path <- index_path
+  if (!is.null(header)) params$header <- isTRUE(header)
+  if (!is.null(auto_detect)) params$auto_detect <- isTRUE(auto_detect)
+  if (!is.null(header_names)) {
+    if (!is.character(header_names)) stop("header_names must be a character vector", call. = FALSE)
+    params$header_names <- header_names
+  }
+  if (!is.null(column_types)) {
+    if (!is.character(column_types)) stop("column_types must be a character vector", call. = FALSE)
+    params$column_types <- normalize_tabix_types(column_types)
+  }
+  if (isTRUE(attributes_map)) params$attributes_map <- TRUE
+  if (isTRUE(attributes_list)) params$attributes_list <- TRUE
+  if (isTRUE(attributes_pairs)) params$attributes_pairs <- TRUE
+  .hts_multi_read(con, table_name, "read_gtf", files, params, .params, overwrite)
 }

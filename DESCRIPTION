@@ -1,12 +1,13 @@
 Package: Rduckhts
 Title: 'DuckDB' High Throughput Sequencing File Formats Reader
         Extension
-Version: 1.1.6-0.0.2
+Version: 1.2.1-0.1.0
 Authors@R: c(
-        person(given = "Sounkou Mahamane", family = "Toure",
+    person(given = "Sounkou Mahamane", family = "Toure",
     email = "sounkoutoure@gmail.com",
     role = c("aut", "cre")),
     person(given = "James K Bonfield, John Marshall,Petr Danecek ,Heng Li , Valeriu Ohan, Andrew Whitwham,Thomas Keane , Robert M Davies", role = "ctb", comment = "Htslib Authors"),
+    person(given = "Brent", family = "Pedersen", role = "cph", comment = "Mosdepth Original Author"),
     person(given = "Giulio", family = "Genovese", email = "giulio.genovese@gmail.com", role = "cph", comment = "Author of BCFTools munge,score,liftover plugins"),
     person(given = "DuckDB C Extension API Authors", role = "ctb")
     )
@@ -27,13 +28,14 @@ URL: https://github.com/RGenomicsETL/duckhts,
         https://rgenomicsetl.r-universe.dev/Rduckhts
 BugReports: https://github.com/RGenomicsETL/duckhts/issues
 NeedsCompilation: no
-Packaged: 2026-04-09 14:02:06 UTC; stoure
+Packaged: 2026-05-07 17:17:45 UTC; sounkoutoure
 Author: Sounkou Mahamane Toure [aut, cre],
   James K Bonfield, John Marshall,Petr Danecek ,Heng Li , Valeriu Ohan,
     Andrew Whitwham,Thomas Keane , Robert M Davies [ctb] (Htslib
     Authors),
+  Brent Pedersen [cph] (Mosdepth Original Author),
   Giulio Genovese [cph] (Author of BCFTools munge,score,liftover plugins),
   DuckDB C Extension API Authors [ctb]
 Maintainer: Sounkou Mahamane Toure <sounkoutoure@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-04-09 14:50:02 UTC
+Date/Publication: 2026-05-07 19:02:04 UTC

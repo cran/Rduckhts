@@ -5,13 +5,19 @@ set -eu
 THIS_DIR=`dirname "$0"`
 THIS_DIR=`cd "$THIS_DIR" && pwd`
 
-# Capture configure arguments (--host, --build, etc.)
-CONFIGURE_ARGS="$@"
+# Capture configure arguments (--host, --build, etc.) while preserving
+# Autoconf-style NAME=VALUE cache overrides injected by rwasm.
+CONFIGURE_ARGS=""
+CONFIGURE_CACHE_VARS=""
 
 HOST_TRIPLET=""
+BUILD_TRIPLET=""
 for arg in "$@"; do
   case "$arg" in
     --host=*) HOST_TRIPLET="${arg#--host=}";;
+    --build=*) BUILD_TRIPLET="${arg#--build=}";;
+    [A-Za-z_]*=*) CONFIGURE_CACHE_VARS="${CONFIGURE_CACHE_VARS} ${arg}";;
+    *) CONFIGURE_ARGS="${CONFIGURE_ARGS} ${arg}";;
   esac
 done
 
@@ -57,6 +63,19 @@ fi
 CFLAGS="${R_CFLAGS} ${R_CPICFLAGS} -O2 -fPIC -D_FILE_OFFSET_BITS=64"
 CPPFLAGS="${R_CPPFLAGS} -DNDEBUG"
 LDFLAGS="${R_LDFLAGS}"
+EM_PORT_FLAGS=""
+
+if [ "${WASM_BUILD}" = "yes" ]; then
+  # webR/rwasm provide zlib and bzip2 via Emscripten ports, but nested
+  # Autoconf probes only see them if we forward the same link flags here.
+  EM_PORT_FLAGS="-s USE_ZLIB=1 -s USE_BZIP2=1"
+  CFLAGS="${CFLAGS} ${EM_PORT_FLAGS}"
+  LDFLAGS="${LDFLAGS} ${EM_PORT_FLAGS}"
+fi
+
+# Keep stricter diagnostics on DuckHTS extension sources without applying them
+# to the vendored htslib build.
+EXT_CFLAGS="${CFLAGS} -Wpedantic"
 
 add_prefix_if_header() {
   header=$1
@@ -104,7 +123,7 @@ OS_NAME=`uname -s`
 ARCH_NAME=`uname -m`
 DUCKDB_PLATFORM=""
 if [ "${WASM_BUILD}" = "yes" ]; then
-  DUCKDB_PLATFORM="wasm_mvp"
+  DUCKDB_PLATFORM="linux_i686_musl"
 fi
 if [ -z "${DUCKDB_PLATFORM}" ]; then
   case "${OS_NAME}" in
@@ -191,7 +210,11 @@ if try_compile_header_lib "lzma" "lzma.h" "-llzma" "no"; then
   LIBS="$LIBS -llzma"
 fi
 
-if try_compile_header_lib "curl" "curl/curl.h" "-lcurl" "no"; then
+if [ "${WASM_BUILD}" = "yes" ]; then
+  : # libcurl intentionally disabled on wasm: socket emulation fails from DuckDB
+    # SIDE_MODULE context.  HTTP/HTTPS access uses our own wasm_http_hfile.c
+    # backend (synchronous XHR via EM_ASM) registered at extension init.
+elif try_compile_header_lib "curl" "curl/curl.h" "-lcurl" "no"; then
   HAS_CURL=yes
   LIBS="$LIBS -lcurl"
 fi
@@ -202,9 +225,11 @@ else
   OPENSSL_TEST_LIBS="-lssl -lcrypto"
 fi
 
-if try_compile_header_lib "openssl" "openssl/ssl.h" "${OPENSSL_TEST_LIBS}" "no"; then
-  HAS_OPENSSL=yes
-  LIBS="$LIBS ${OPENSSL_TEST_LIBS}"
+if [ "${WASM_BUILD}" != "yes" ]; then
+  if try_compile_header_lib "openssl" "openssl/ssl.h" "${OPENSSL_TEST_LIBS}" "no"; then
+    HAS_OPENSSL=yes
+    LIBS="$LIBS ${OPENSSL_TEST_LIBS}"
+  fi
 fi
 
 LIBS="$LIBS -lpthread"
@@ -212,21 +237,45 @@ LIBS="$LIBS -lpthread"
 echo "---------- Configuring htslib ----------"
 cd "${HTSLIB_DIR}"
 
-CONFIGURE_EXTRA_FLAGS=""
+HTSLIB_CONFIGURE_CACHE_VARS="${CONFIGURE_CACHE_VARS}"
 HTSLIB_PLUGINS="--enable-plugins"
 HTSLIB_S3="--enable-s3"
 HTSLIB_GCS="--enable-gcs"
 
 if [ "${WASM_BUILD}" = "yes" ]; then
   echo "Detected WebAssembly/r-wasm build environment"
-  echo "Disabling plugins, S3, and GCS support (not available in wasm)"
-  CONFIGURE_EXTRA_FLAGS="ac_cv_func_getrandom=no ac_cv_func_fork=no ac_cv_func_vfork=no ac_cv_func_CCHmac=no"
+  echo "Disabling plugins, S3, GCS, and LZMA support in wasm"
+  HTSLIB_CONFIGURE_CACHE_VARS="${HTSLIB_CONFIGURE_CACHE_VARS} ac_cv_func_getrandom=no ac_cv_func_fork=no ac_cv_func_vfork=no ac_cv_func_CCHmac=no ac_cv_func_srand48_deterministic=no"
   HTSLIB_PLUGINS="--disable-plugins"
+  HAS_LZMA=no
   HTSLIB_S3="--disable-s3"
   HTSLIB_GCS="--disable-gcs"
+  CPPFLAGS="${CPPFLAGS} -include ${EXT_DIR}/include/wasm_socket_compat.h"
 fi
 
 HTSLIB_CONFIGURE_FLAGS="${HTSLIB_PLUGINS} ${HTSLIB_S3} ${HTSLIB_GCS}"
+HTSLIB_CROSS_FLAGS=""
+
+if [ -n "${BUILD_TRIPLET}" ]; then
+  HTSLIB_CROSS_FLAGS="${HTSLIB_CROSS_FLAGS} --build=${BUILD_TRIPLET}"
+fi
+
+if [ -n "${HOST_TRIPLET}" ]; then
+  HTSLIB_CROSS_FLAGS="${HTSLIB_CROSS_FLAGS} --host=${HOST_TRIPLET}"
+fi
+
+if [ "$HAS_ZLIB" = "yes" ]; then
+  HTSLIB_CONFIGURE_CACHE_VARS="${HTSLIB_CONFIGURE_CACHE_VARS} ac_cv_lib_z_inflate=yes"
+fi
+
+if [ "$HAS_BZ2" = "yes" ]; then
+  HTSLIB_CONFIGURE_CACHE_VARS="${HTSLIB_CONFIGURE_CACHE_VARS} ac_cv_header_bzlib_h=yes ac_cv_lib_bz2_BZ2_bzBuffToBuffCompress=yes"
+fi
+
+if [ "${WASM_BUILD}" = "yes" ]; then
+  ac_cv_search_recv="none required"
+  export ac_cv_search_recv
+fi
 
 if [ "$HAS_BZ2" = "no" ]; then
   echo "INFO: libbz2 not found - disabling BZ2 support in htslib"
@@ -239,13 +288,36 @@ if [ "$HAS_LZMA" = "no" ]; then
 fi
 
 if [ "$HAS_CURL" = "no" ]; then
-  echo "INFO: libcurl not found - disabling remote URL support in htslib"
+  if [ "${WASM_BUILD}" = "yes" ]; then
+    echo "INFO: libcurl disabled on wasm - disabling htslib's libcurl URL backend; browser HTTP uses wasm_http_hfile.c"
+  else
+    echo "INFO: libcurl not found - disabling remote URL support in htslib"
+  fi
   HTSLIB_CONFIGURE_FLAGS="$HTSLIB_CONFIGURE_FLAGS --disable-libcurl --disable-s3 --disable-gcs"
 elif [ "$HAS_OPENSSL" = "no" ]; then
   HTSLIB_CONFIGURE_FLAGS="$HTSLIB_CONFIGURE_FLAGS --disable-s3 --disable-gcs"
 fi
 
-${CONFIGURE_EXTRA_FLAGS} ./configure \
+HTSLIB_LIBS=""
+if [ "${WASM_BUILD}" != "yes" ] && [ "$HAS_ZLIB" = "yes" ]; then
+  HTSLIB_LIBS="${HTSLIB_LIBS} -lz"
+fi
+if [ "${WASM_BUILD}" != "yes" ] && [ "$HAS_BZ2" = "yes" ]; then
+  HTSLIB_LIBS="${HTSLIB_LIBS} -lbz2"
+fi
+if [ "$HAS_LZMA" = "yes" ]; then
+  HTSLIB_LIBS="${HTSLIB_LIBS} -llzma"
+fi
+if [ "$HAS_CURL" = "yes" ]; then
+  HTSLIB_LIBS="${HTSLIB_LIBS} -lcurl"
+fi
+if [ "$HAS_OPENSSL" = "yes" ]; then
+  HTSLIB_LIBS="${HTSLIB_LIBS} ${OPENSSL_TEST_LIBS}"
+fi
+HTSLIB_LIBS="${HTSLIB_LIBS} -lpthread"
+
+env ${HTSLIB_CONFIGURE_CACHE_VARS} ./configure \
+  ${HTSLIB_CROSS_FLAGS} \
   ${CONFIGURE_ARGS} \
   --prefix="${HTSLIB_DIR}" \
   CC="${CC}" \
@@ -254,14 +326,17 @@ ${CONFIGURE_EXTRA_FLAGS} ./configure \
   CFLAGS="${CFLAGS}" \
   CPPFLAGS="${CPPFLAGS}" \
   LDFLAGS="${LDFLAGS}" \
-  LIBS="${LIBS}" \
+  LIBS="${HTSLIB_LIBS}" \
   ${HTSLIB_CONFIGURE_FLAGS}
 
-echo "---------- Building htslib (static + shared) ----------"
+echo "---------- Building htslib ----------"
 # chek if thread is set or default to 1
 THREADS=${THREADS:-1}
 
-HTSLIB_BUILD_TARGETS="libhts.a libhts.${SHLIB_EXT}"
+HTSLIB_BUILD_TARGETS="libhts.a"
+if [ "${WASM_BUILD}" != "yes" ]; then
+  HTSLIB_BUILD_TARGETS="${HTSLIB_BUILD_TARGETS} libhts.${SHLIB_EXT}"
+fi
 if [ "${HTSLIB_PLUGINS}" = "--enable-plugins" ]; then
   HTSLIB_BUILD_TARGETS="$HTSLIB_BUILD_TARGETS plugins"
 fi
@@ -271,17 +346,17 @@ ${MAKE} -j${THREADS} ${HTSLIB_BUILD_TARGETS}
 # Avoid "make install" in bundled builds: platform install tools differ and
 mkdir -p "${HTSLIB_DIR}/lib" "${HTSLIB_DIR}/include/htslib" "${HTSLIB_DIR}/libexec/htslib"
 cp -f libhts.a "${HTSLIB_DIR}/lib/libhts.a"
-if [ -f "libhts.${SHLIB_EXT}" ]; then
+if [ "${WASM_BUILD}" != "yes" ] && [ -f "libhts.${SHLIB_EXT}" ]; then
   cp -f "libhts.${SHLIB_EXT}" "${HTSLIB_DIR}/lib/libhts.${SHLIB_EXT}"
 fi
-if [ "${SHLIB_EXT}" = "so" ]; then
+if [ "${WASM_BUILD}" != "yes" ] && [ "${SHLIB_EXT}" = "so" ]; then
   # htslib on Linux typically produces libhts.so and libhts.so.3.
   if [ -e "libhts.so.3" ]; then
     cp -f "libhts.so.3" "${HTSLIB_DIR}/lib/libhts.so.3"
   elif [ -f "libhts.so" ]; then
     ln -sf "libhts.so" "${HTSLIB_DIR}/lib/libhts.so.3"
   fi
-elif [ -f "libhts.3.${SHLIB_EXT}" ]; then
+elif [ "${WASM_BUILD}" != "yes" ] && [ -f "libhts.3.${SHLIB_EXT}" ]; then
   cp -f "libhts.3.${SHLIB_EXT}" "${HTSLIB_DIR}/lib/libhts.3.${SHLIB_EXT}"
 fi
 cp -f htslib/*.h "${HTSLIB_DIR}/include/htslib/" || true
@@ -301,17 +376,22 @@ if [ ! -f "libhts.a" ]; then
   exit 1
 fi
 
-HTSLIB_SHARED_LIB=""
-if [ -f "${HTSLIB_DIR}/lib/libhts.${SHLIB_EXT}" ]; then
-  HTSLIB_SHARED_LIB="${HTSLIB_DIR}/lib/libhts.${SHLIB_EXT}"
+HTSLIB_LINK_INPUT="-L${HTSLIB_DIR}/lib -lhts"
+if [ "${WASM_BUILD}" = "yes" ]; then
+  HTSLIB_LINK_INPUT="${HTSLIB_DIR}/lib/libhts.a"
+else
+  HTSLIB_SHARED_LIB=""
+  if [ -f "${HTSLIB_DIR}/lib/libhts.${SHLIB_EXT}" ]; then
+    HTSLIB_SHARED_LIB="${HTSLIB_DIR}/lib/libhts.${SHLIB_EXT}"
+  fi
+
+  if [ -z "${HTSLIB_SHARED_LIB}" ]; then
+    echo "ERROR: htslib shared library not found (libhts.so/libhts.dylib)"
+    exit 1
+  fi
 fi
 
-if [ -z "${HTSLIB_SHARED_LIB}" ]; then
-  echo "ERROR: htslib shared library not found (libhts.so/libhts.dylib)"
-  exit 1
-fi
-
-if [ "`uname`" = "Darwin" ]; then
+if [ "${WASM_BUILD}" != "yes" ] && [ "`uname`" = "Darwin" ]; then
   echo "Fixing htslib install names for macOS..."
   if [ -f "${HTSLIB_DIR}/lib/libhts.3.dylib" ]; then
     install_name_tool -id @rpath/libhts.3.dylib "${HTSLIB_DIR}/lib/libhts.3.dylib" || true
@@ -325,7 +405,7 @@ echo "---------- Building DuckHTS extension ----------"
 
 cd "${EXT_DIR}"
 
-C_SOURCES="duckhts.c bcf_reader.c bam_reader.c bgzip.c hts_index_builder.c liftover_udf.c munge_udf.c seq_reader.c interval_udf.c tabix_reader.c hts_meta_reader.c quality_encoding.c quality_encoding_reader.c bcftools_filter.c bcftools_shim.c score_udf.c vep_parser.c kmer_udf.c"
+C_SOURCES="duckhts.c bcf_reader.c bam_reader.c bgzip.c hts_index_builder.c liftover_udf.c munge_udf.c seq_reader.c interval_udf.c tabix_reader.c hts_meta_reader.c quality_encoding.c quality_encoding_reader.c mosdepth_table.c bam_bin_counts.c samtools_idxstats_table.c bam_bed_coverage.c cgranges_api.c cgranges.c bcftools_filter.c bcftools_shim.c score_udf.c vep_parser.c kmer_udf.c wasm_http_hfile.c"
 INCLUDES="-I./include -I./duckdb_capi -I./htslib"
 
 echo "Compiling extension sources..."
@@ -333,7 +413,7 @@ OBJECT_FILES=""
 for src_file in $C_SOURCES; do
     obj_file="${src_file%.c}.o"
     echo "  Compiling $src_file -> $obj_file"
-  ${CC} ${CFLAGS} ${CPPFLAGS} ${INCLUDES} -c "$src_file" -o "$obj_file"
+  ${CC} ${EXT_CFLAGS} ${CPPFLAGS} ${INCLUDES} -c "$src_file" -o "$obj_file"
     if [ $? -ne 0 ]; then
         echo "ERROR: Failed to compile $src_file"
         exit 1
@@ -354,13 +434,22 @@ case "${OS_NAME}" in
     ;;
 esac
 
+EXT_EXPORT_FLAGS=""
+if [ "${WASM_BUILD}" = "yes" ]; then
+  # Emscripten side modules do not automatically expose default-visible
+  # symbols as wasm exports. DuckDB's loader looks up duckhts_init_c_api
+  # by name, so export it explicitly in the final wasm link.
+  EXT_EXPORT_FLAGS="-Wl,--export=duckhts_init_c_api"
+fi
+
 # Link the extension (raw, metadata appended later)
 echo "Linking DuckHTS extension..."
 RAW_EXT_FILE="${BUILD_DIR}/duckhts.duckdb_extension.raw"
 FINAL_EXT_FILE="${BUILD_DIR}/duckhts.duckdb_extension"
-${CC} -shared -fPIC ${EXT_RPATH} -o "${RAW_EXT_FILE}" \
+${CC} -shared -fPIC ${LDFLAGS} ${EXT_RPATH} -o "${RAW_EXT_FILE}" \
+    ${EXT_EXPORT_FLAGS} \
     $OBJECT_FILES \
-  -L"${HTSLIB_DIR}/lib" -lhts \
+  ${HTSLIB_LINK_INPUT} \
   $LIBS
 
 if [ $? -ne 0 ]; then
@@ -395,5 +484,28 @@ rm -f "${RAW_EXT_FILE}"
 find "${HTSLIB_DIR}" -name "*.o" -delete || true
 # only keep ${HTSLIB_DIR}/lib and ${HTSLIB_DIR}/include for the extension, remove everything else
 find "${HTSLIB_DIR}" -mindepth 1 -maxdepth 1 ! -name "libexec" ! -name "lib" ! -name "include" -exec rm -rf {} \; || true
+
+# ---------- Generate htslib_config.R from template ----------
+HTSLIB_CONFIG_IN="${THIS_DIR}/inst/htslib_config.R.in"
+HTSLIB_CONFIG_OUT="${THIS_DIR}/inst/htslib_config.R"
+if [ -f "${HTSLIB_CONFIG_IN}" ]; then
+  if [ "${WASM_BUILD}" = "yes" ]; then
+    HTSLIB_STATIC_DEFAULT="TRUE"
+  else
+    HTSLIB_STATIC_DEFAULT="FALSE"
+  fi
+  HTSLIB_DEP_LIBS_ESCAPED=`echo "${LIBS}" | sed 's/[&/\\\\]/\\\\&/g'`
+  HTSLIB_VERSION_STR=""
+  if [ -f "${HTSLIB_DIR}/include/htslib/hts.h" ]; then
+    HTSLIB_VERSION_STR=`awk -F'"' '/HTS_VERSION_TEXT/ {print $2; exit}' "${HTSLIB_DIR}/include/htslib/hts.h" 2>/dev/null || true`
+  fi
+  sed \
+    -e "s/@HTSLIB_STATIC_DEFAULT@/${HTSLIB_STATIC_DEFAULT}/g" \
+    -e "s/@HTSLIB_DEP_LIBS@/${HTSLIB_DEP_LIBS_ESCAPED}/g" \
+    -e "s/@HTSLIB_VERSION@/${HTSLIB_VERSION_STR}/g" \
+    "${HTSLIB_CONFIG_IN}" > "${HTSLIB_CONFIG_OUT}"
+  echo "Generated inst/htslib_config.R"
+fi
+
 cd "${THIS_DIR}"
 echo "Configure complete"

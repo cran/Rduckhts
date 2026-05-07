@@ -63,10 +63,10 @@
       "name": "read_bam",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_bam(path, standard_tags := FALSE, auxiliary_tags := FALSE, region := NULL, index_path := NULL, reference := NULL, sequence_encoding := 'string', quality_representation := 'string')",
+      "signature": "read_bam(path, standard_tags := FALSE, auxiliary_tags := FALSE, region := NULL, index_path := NULL, reference := NULL, sequence_encoding := 'string', quality_representation := 'string', decompression_threads := 2)",
       "returns": "table",
       "r_wrapper": "rduckhts_bam",
-      "description": "Read SAM, BAM, and CRAM alignments with optional typed SAMtags and auxiliary tag maps. Use sequence_encoding := 'nt16' to return SEQ as UTINYINT[] and quality_representation := 'phred' to return QUAL as UTINYINT[] instead of VARCHAR.",
+      "description": "Read SAM, BAM, and CRAM alignments with optional typed SAMtags and auxiliary tag maps. Use sequence_encoding := 'nt16' to return SEQ as UTINYINT[] and quality_representation := 'phred' to return QUAL as UTINYINT[] instead of VARCHAR. decompression_threads controls per-file htslib worker threads and defaults to 2; use 0 to disable worker threads.",
       "examples": [
         "SELECT QNAME, FLAG, RNAME, POS FROM read_bam('range.bam') LIMIT 5;"
       ]
@@ -108,6 +108,138 @@
       ]
     },
     {
+      "name": "duckhts_cgranges_create",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "duckhts_cgranges_create(name)",
+      "returns": "BOOLEAN",
+      "r_wrapper": "",
+      "description": "Create an empty session-scoped cgranges registry entry that can be populated with intervals and finalized for overlap queries.",
+      "examples": [
+        "SELECT duckhts_cgranges_create('targets_idx');"
+      ]
+    },
+    {
+      "name": "duckhts_cgranges_add",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "duckhts_cgranges_add(name, chrom, start, end[, label])",
+      "returns": "BOOLEAN",
+      "r_wrapper": "",
+      "description": "Append an interval to a session-scoped cgranges registry entry before finalization. Labels may be BIGINT-like, DOUBLE, VARCHAR, or BOOLEAN.",
+      "examples": [
+        "SELECT duckhts_cgranges_add('targets_idx', 'chr1', 10, 20, 'exon1');"
+      ]
+    },
+    {
+      "name": "duckhts_cgranges_index",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "duckhts_cgranges_index(name)",
+      "returns": "BOOLEAN",
+      "r_wrapper": "",
+      "description": "Finalize a populated cgranges registry entry and build its immutable overlap index for subsequent queries.",
+      "examples": [
+        "SELECT duckhts_cgranges_index('targets_idx');"
+      ]
+    },
+    {
+      "name": "duckhts_cgranges_destroy",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "duckhts_cgranges_destroy(name)",
+      "returns": "BOOLEAN",
+      "r_wrapper": "",
+      "description": "Destroy a session-scoped cgranges registry entry and release its indexed interval storage when it is not in active use.",
+      "examples": [
+        "SELECT duckhts_cgranges_destroy('targets_idx');"
+      ]
+    },
+    {
+      "name": "duckhts_cgranges_from_query",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "duckhts_cgranges_from_query(name, query, chrom_col, start_col, end_col[, label_col])",
+      "returns": "BOOLEAN",
+      "r_wrapper": "",
+      "description": "Execute a SQL query on an extension-owned DuckDB connection, append its interval rows into a session-scoped cgranges registry entry, and leave the populated index ready for explicit finalization with duckhts_cgranges_index(...).",
+      "examples": [
+        "SELECT duckhts_cgranges_from_query('targets_idx', 'SELECT chrom, start, \"end\", name FROM targets', 'chrom', 'start', 'end', 'name');"
+      ]
+    },
+    {
+      "name": "duckhts_cgranges_from_table",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "duckhts_cgranges_from_table(name, table_name, chrom_col, start_col, end_col[, label_col])",
+      "returns": "BOOLEAN",
+      "r_wrapper": "",
+      "description": "Reserved convenience constructor for bulk cgranges population from a table name. The current implementation is intentionally deferred and directs callers to duckhts_cgranges_from_query(...).",
+      "examples": [
+        "SELECT duckhts_cgranges_from_table('targets_idx', 'targets', 'chrom', 'start', 'end', 'name');"
+      ]
+    },
+    {
+      "name": "duckhts_cgranges_has_overlap",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "duckhts_cgranges_has_overlap(name, chrom, start, end[, mode])",
+      "returns": "BOOLEAN",
+      "r_wrapper": "",
+      "description": "Vectorized scalar predicate for streaming provider rows through a finalized session-scoped cgranges index. Returns TRUE when the query interval overlaps at least one indexed interval, or when mode = 'contain' and it fully contains at least one indexed interval; NULL inputs return NULL.",
+      "examples": [
+        "SELECT * FROM read_bed('queries.bed') WHERE duckhts_cgranges_has_overlap('targets_idx', chrom, start, \"end\");"
+      ]
+    },
+    {
+      "name": "duckhts_cgranges_count_overlaps",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "duckhts_cgranges_count_overlaps(name, chrom, start, end[, mode])",
+      "returns": "BIGINT",
+      "r_wrapper": "",
+      "description": "Vectorized scalar overlap counter for streaming provider rows through a finalized session-scoped cgranges index. Returns the number of indexed intervals that overlap the query interval, or with mode = 'contain' the number fully contained by it; NULL inputs return NULL.",
+      "examples": [
+        "SELECT chrom, start, \"end\", duckhts_cgranges_count_overlaps('targets_idx', chrom, start, \"end\") AS n_targets FROM read_bed('queries.bed');"
+      ]
+    },
+    {
+      "name": "duckhts_cgranges_overlaps_list",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "duckhts_cgranges_overlaps_list(name, chrom, start, end[, mode])",
+      "returns": "STRUCT(interval_ordinal BIGINT, label VARCHAR, label_type VARCHAR, interval_chrom VARCHAR, interval_start INTEGER, interval_end INTEGER)[]",
+      "r_wrapper": "",
+      "description": "Vectorized scalar overlap expander for streaming provider rows through a finalized session-scoped cgranges index. Returns a LIST of hit STRUCTs that can be expanded with UNNEST, preserving provider columns while emitting one row per matching indexed interval. Because scalar return types are fixed, labels are returned as text with label_type describing the original cgranges label kind; NULL inputs return NULL.",
+      "examples": [
+        "SELECT q.*, hit.interval_chrom, hit.interval_start, hit.interval_end, hit.label FROM read_bed('queries.bed') AS q CROSS JOIN UNNEST(duckhts_cgranges_overlaps_list('targets_idx', q.chrom, q.start, q.\"end\")) AS u(hit);"
+      ]
+    },
+    {
+      "name": "duckhts_cgranges_overlaps",
+      "kind": "table",
+      "category": "Intervals",
+      "signature": "duckhts_cgranges_overlaps(name, chrom, start, end, mode := 'overlap', query_row_id := NULL)",
+      "returns": "table",
+      "r_wrapper": "",
+      "description": "Query a finalized session-scoped cgranges registry entry and return one row per overlapping or containing indexed interval, preserving the original label type and interval coordinates.",
+      "examples": [
+        "SELECT * FROM duckhts_cgranges_overlaps('targets_idx', 'chr1', 100, 150);"
+      ]
+    },
+    {
+      "name": "duckhts_cgranges_overlaps_bulk",
+      "kind": "table",
+      "category": "Intervals",
+      "signature": "duckhts_cgranges_overlaps_bulk(name, query, chrom_col, start_col, end_col, mode := 'overlap', query_row_id_col := NULL)",
+      "returns": "table",
+      "r_wrapper": "",
+      "description": "Run a SQL query that yields overlap probes, stream those rows through a finalized session-scoped cgranges registry entry, and return one row per matching indexed interval. The probe query runs on the extension-owned helper connection, so it must reference regular tables/views rather than connection-local temp tables. When query_row_id_col is omitted, query_row_id defaults to the 1-based probe row ordinal.",
+      "examples": [
+        "SELECT * FROM duckhts_cgranges_overlaps_bulk('targets_idx', 'SELECT probe_id, chrom, start, \"end\" FROM probes', 'chrom', 'start', 'end', query_row_id_col := 'probe_id');"
+      ]
+    },
+    {
       "name": "read_fastq",
       "kind": "table",
       "category": "Readers",
@@ -135,10 +267,10 @@
       "name": "read_gff",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_gff(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, attributes_map := FALSE, region := NULL, index_path := NULL)",
+      "signature": "read_gff(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, attributes_map := FALSE, attributes_list := FALSE, attributes_pairs := FALSE, strict := FALSE, region := NULL, index_path := NULL)",
       "returns": "table",
       "r_wrapper": "rduckhts_gff",
-      "description": "Read GFF annotations with optional parsed attribute maps and indexed region filtering.",
+      "description": "Read GFF annotations with optional raw scalar and richer list/pair parsed attribute columns, strict GFF3 structural validation, and indexed region filtering.",
       "examples": [
         "SELECT seqname, feature, start, \"end\" FROM read_gff('gff_file.gff.gz') LIMIT 5;"
       ]
@@ -147,10 +279,10 @@
       "name": "read_gtf",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_gtf(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, attributes_map := FALSE, region := NULL, index_path := NULL)",
+      "signature": "read_gtf(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, attributes_map := FALSE, attributes_list := FALSE, attributes_pairs := FALSE, region := NULL, index_path := NULL)",
       "returns": "table",
       "r_wrapper": "rduckhts_gtf",
-      "description": "Read GTF annotations with optional parsed attribute maps and indexed region filtering.",
+      "description": "Read GTF annotations with optional raw scalar and richer list/pair parsed attribute columns and indexed region filtering.",
       "examples": [
         "SELECT seqname, feature, start, \"end\" FROM read_gtf('annotations.gtf.gz') LIMIT 5;"
       ]
@@ -240,6 +372,54 @@
       ]
     },
     {
+      "name": "bam_bin_counts",
+      "kind": "table",
+      "category": "Coverage",
+      "signature": "bam_bin_counts(path, bin_width, chrom := NULL, reference := NULL, index_path := NULL, mapq := 0, require_flags := 0, exclude_flags := 0, rmdup := 'none', stats := NULL)",
+      "returns": "table",
+      "r_wrapper": "rduckhts_bam_bin_counts",
+      "description": "Count BAM or CRAM read starts into fixed-width bins. Returns one row per bin across the selected contig span, including zero-count bins, with total, forward, and reverse counts; `rmdup := 'streaming'` applies the WisecondorX-style larp/larp2 consecutive-position deduplication, `rmdup := 'flag'` drops SAM duplicate-flagged reads, and `stats := 'gc'`, `'mq'`, or `'gc,mq'` adds per-bin pre/post-filter GC and MAPQ sufficient statistics, including reference GC when `reference` is provided.",
+      "examples": [
+        "SELECT * FROM bam_bin_counts('fixture_mixed.cram', 5000, reference := 'fixture_ref.fa', rmdup := 'streaming', stats := 'gc,mq');"
+      ]
+    },
+    {
+      "name": "duckhts_bam_bed_coverage",
+      "kind": "table",
+      "category": "Coverage",
+      "signature": "duckhts_bam_bed_coverage(path, bed_path, reference := NULL, index_path := NULL, bed_index_path := NULL, mapq := 0, min_baseq := 0, min_read_len := 0, require_flags := 0, exclude_flags := 1796, min_depth := 1, max_depth := 1000000, decompression_threads := 0, fragment_mode := FALSE, strand_outputs := TRUE, processing_threads := 0)",
+      "returns": "table",
+      "r_wrapper": "rduckhts_bam_bed_coverage",
+      "description": "Compute samtools coverage-like regional summaries for BAM or CRAM input over a BED target set, returning one row per BED interval with DuckHTS-specific pre/post-filter read counts, covered bases, percentage covered, mean depth, mean baseQ, mean mapQ, and strand-specific post-filter summaries in read mode. Indexed BAM/CRAM input is required in the current implementation. decompression_threads controls htslib worker threads for BAM/CRAM decoding; use 0 to disable them.",
+      "examples": [
+        "SELECT chrom, start, \"end\", numreads_post, covbases_post, coverage_post FROM duckhts_bam_bed_coverage('fixture_mixed.bam', 'fixture_mixed_regions.bed');"
+      ]
+    },
+    {
+      "name": "duckhts_mosdepth",
+      "kind": "table",
+      "category": "Coverage",
+      "signature": "duckhts_mosdepth(prefix, path, chrom := NULL, by := NULL, fasta := NULL, read_groups := NULL, no_per_base := FALSE, threads := 2, processing_threads := 2, flag := 1796, include_flag := 0, fast_mode := FALSE, fragment_mode := FALSE, use_median := FALSE, mapq := 0, min_frag_len := -1, max_frag_len := -1, precision_digits := 2, quantize := NULL, thresholds := NULL, index_path := NULL, overwrite := FALSE)",
+      "returns": "table",
+      "r_wrapper": "rduckhts_mosdepth",
+      "description": "Write native mosdepth-compatible coverage outputs for indexed BAM or CRAM input. Produces mosdepth-style summary, global distribution, per-base BED.gz + CSI, optional window/BED region outputs, optional quantized BED.gz + CSI, and optional threshold counts for `by`; `fast_mode` defaults to FALSE to match upstream mosdepth, default mode performs CIGAR-aware coverage with mate-overlap correction, `fragment_mode` switches coverage to full-fragment insert spans for proper pairs, `use_median` switches `by` outputs from mean to median, `read_groups` filters by comma-separated RG IDs, `min_frag_len` and `max_frag_len` filter on absolute template length, `fasta` is required for CRAM when htslib needs a reference, `precision_digits` controls decimal places in the text outputs, and `processing_threads` enables parallel contig processing (0 = sequential, >0 = number of worker threads).",
+      "examples": [
+        "SELECT * FROM duckhts_mosdepth('sample', 'range.cram', fasta := 'ce.fa', by := '1000', fragment_mode := TRUE, read_groups := '1', use_median := TRUE, min_frag_len := 50, max_frag_len := 500, quantize := ':1:4:', thresholds := '1,10,20', precision_digits := 4, overwrite := TRUE);"
+      ]
+    },
+    {
+      "name": "duckhts_samtools_idxstats",
+      "kind": "table",
+      "category": "Metadata",
+      "signature": "duckhts_samtools_idxstats(path, output := NULL, index_path := NULL, threads := 0, overwrite := FALSE)",
+      "returns": "table",
+      "r_wrapper": "rduckhts_samtools_idxstats",
+      "description": "Write samtools idxstats-compatible TAB-delimited output for BAM, CRAM, or SAM input. Indexed BAM uses `hts_idx_get_stat(...)` for the fast path; CRAM, SAM, and unindexed BAM fall back to a full scan while preserving samtools-style contig rows plus the final `*` row.",
+      "examples": [
+        "SELECT * FROM duckhts_samtools_idxstats('range.bam', output := 'range.idxstats.txt', overwrite := TRUE);"
+      ]
+    },
+    {
       "name": "read_hts_header",
       "kind": "table",
       "category": "Metadata",
@@ -316,12 +496,14 @@
       "name": "bcftools_score",
       "kind": "table",
       "category": "Variants",
-      "signature": "bcftools_score(bcf_path, summary_path, use := NULL, columns := 'PLINK', columns_file := NULL, q_score_thr := NULL, use_variant_id := FALSE, counts := FALSE, samples := NULL, force_samples := FALSE, regions := NULL, regions_file := NULL, regions_overlap := 1, targets := NULL, targets_file := NULL, targets_overlap := 0, apply_filters := NULL, include := NULL, exclude := NULL)",
+      "signature": "bcftools_score(bcf_path, summary_path_or_list, use := NULL, columns := 'PLINK', columns_file := NULL, q_score_thr := NULL, summaries_list_file := NULL, log_path := NULL, use_variant_id := FALSE, counts := FALSE, samples := NULL, force_samples := FALSE, regions := NULL, regions_file := NULL, regions_overlap := 1, targets := NULL, targets_file := NULL, targets_overlap := 0, apply_filters := NULL, include := NULL, exclude := NULL)",
       "returns": "table",
       "r_wrapper": "rduckhts_score",
-      "description": "Compute polygenic scores from one genotype BCF/VCF and one summary-statistics file with bcftools +score-compatible GT/DS/HDS/AP/GP/AS dosage semantics, sample subsetting, and region/target/FILTER-string controls.",
+      "description": "Compute polygenic scores from one genotype BCF/VCF and one or more summary-statistics files with bcftools +score-compatible GT/DS/HDS/AP/GP/AS dosage semantics, sample subsetting, and region/target/FILTER-string controls. The second argument accepts a scalar path or a DuckDB LIST/array of paths; TSV/SSF summaries produce one PRS column per file in a single genotype scan, while GWAS-VCF summaries still produce one PRS column per FORMAT sample. Use summaries_list_file with a NULL second argument to read paths from a file or directory; list-file entries are interpreted as written, matching upstream `bcftools +score --summaries` behavior, while directory inputs scan supported regular summary files in lexicographic order and ignore index sidecars. Use log_path to write per-PRS loaded/matched/allele-mismatch/duplicate-marker audit counts.",
       "examples": [
-        "SELECT * FROM bcftools_score('cohort.bcf', 'gwas.tsv.gz', columns := 'PLINK') LIMIT 5;"
+        "SELECT * FROM bcftools_score('cohort.bcf', 'gwas.tsv.gz', columns := 'PLINK') LIMIT 5;",
+        "SELECT * FROM bcftools_score('cohort.bcf', ['score1.tsv.gz', 'score2.tsv.gz'], columns := 'GWAS-SSF') LIMIT 5;",
+        "SELECT * FROM bcftools_score('cohort.bcf', NULL, columns := 'GWAS-SSF', summaries_list_file := 'scores.list', log_path := 'score.log') LIMIT 5;"
       ]
     },
     {
@@ -360,6 +542,19 @@
       "examples": [
         "SELECT * FROM duckdb_munge_metal('metal_results', preset := 'METAL', fasta_ref := 'ref.fa');",
         "SELECT * FROM duckdb_munge_metal('meta', column_map := map(['CHR','BP','A1','A2','SNP','HET_I2','DIRE'], ['chr','pos','ea','nea','snp','HetISq','Direction']), fasta_ref := 'ref.fa');"
+      ]
+    },
+    {
+      "name": "hts_union_query",
+      "kind": "scalar_macro",
+      "category": "Readers",
+      "signature": "hts_union_query(reader, pattern, params := '')",
+      "returns": "VARCHAR",
+      "r_wrapper": "rduckhts_bam_multi, rduckhts_bcf_multi, rduckhts_fastq_multi, rduckhts_fasta_multi, rduckhts_bed_multi, rduckhts_tabix_multi, rduckhts_gff_multi, rduckhts_gtf_multi",
+      "description": "Generate a UNION ALL BY NAME query string that reads every file matching a glob pattern through the named reader function. The result includes a 'filename' column identifying the source file for each row. Assign to a variable with SET VARIABLE and execute via query(getvariable(...)). Optional params string is appended to each reader call. In R, use the typed rduckhts_*_multi() helpers instead, which accept file vectors with optional per-file parameters and create DuckDB tables directly.",
+      "examples": [
+        "SET VARIABLE q = hts_union_query('read_bam', 'samples/*.bam'); SELECT * FROM query(getvariable('q'));",
+        "SET VARIABLE q = hts_union_query('read_bcf', 'cohort/*.vcf.gz', 'tidy_format := true'); SELECT * FROM query(getvariable('q'));"
       ]
     },
     {

@@ -66,12 +66,43 @@ test_interval_readers <- function() {
   first_seq <- seq_nuc[seq_nuc$chrom == "CHROMOSOME_I" & seq_nuc$start == 0, "seq", drop = TRUE]
   expect_equal(first_seq[1], "GCCTAAGCCT")
 
+  n_fasta_path <- system.file("extdata", "nuc_with_n.fa", package = "Rduckhts")
+  n_bed_path <- system.file("extdata", "nuc_with_n.bed", package = "Rduckhts")
+  n_fasta_index_path <- tempfile("duckhts_nuc_n_", fileext = ".fai")
+  expect_true(file.exists(n_fasta_path))
+  expect_true(file.exists(n_bed_path))
+  expect_true(rduckhts_fasta_index(con, n_fasta_path, index_path = n_fasta_index_path)$success[1])
+
+  n_nuc <- rduckhts_fasta_nuc(con, n_fasta_path, bed_path = n_bed_path, index_path = n_fasta_index_path)
+  expect_equal(n_nuc$pct_at[1], 2 / 6)
+  expect_equal(n_nuc$pct_gc[1], 4 / 6)
+  expect_equal(n_nuc$num_a[1], 1)
+  expect_equal(n_nuc$num_c[1], 2)
+  expect_equal(n_nuc$num_g[1], 2)
+  expect_equal(n_nuc$num_t[1], 1)
+  expect_equal(n_nuc$num_n[1], 4)
+  expect_equal(n_nuc$seq_len[1], 10)
+
   gz_path <- tempfile("targets", fileext = ".bed.gz")
   tbi_path <- paste0(gz_path, ".tbi")
-  expect_true(rduckhts_bgzip(con, bed_path, output_path = gz_path, keep = TRUE, overwrite = TRUE)$success[1])
+  expect_true(rduckhts_bgzip(
+    con,
+    bed_path,
+    output_path = gz_path,
+    threads = 1,
+    keep = TRUE,
+    overwrite = TRUE
+  )$success[1])
   expect_true(rduckhts_tabix_index(con, gz_path, preset = "bed", index_path = tbi_path, threads = 1)$success[1])
   expect_silent(rduckhts_bed(con, "targets_idx", gz_path, region = "CHROMOSOME_I:1-20", index_path = tbi_path, overwrite = TRUE))
   expect_equal(DBI::dbGetQuery(con, "SELECT count(*) AS n FROM targets_idx")$n[1], 2)
+
+  bed_count_only <- DBI::dbGetQuery(con, sprintf(
+    "SELECT COUNT(*) AS n FROM read_bed('%s', index_path := '%s')",
+    gz_path,
+    tbi_path
+  ))
+  expect_equal(bed_count_only$n[1], 4)
 }
 
 test_interval_readers()

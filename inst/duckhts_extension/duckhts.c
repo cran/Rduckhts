@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "wasm_http_hfile.h"
+
 DUCKDB_EXTENSION_EXTERN
 
 /* bcf_reader.c */
@@ -49,6 +51,16 @@ extern void register_read_hts_index_spans_function(duckdb_connection connection)
 extern void register_detect_quality_encoding_function(duckdb_connection connection);
 /* score_udf.c */
 extern void register_bcftools_score_function(duckdb_connection connection);
+/* mosdepth_table.c */
+extern void register_duckhts_mosdepth_function(duckdb_connection connection);
+/* bam_bin_counts.c */
+extern void register_bam_bin_counts_function(duckdb_connection connection);
+/* samtools_idxstats_table.c */
+extern void register_duckhts_samtools_idxstats_function(duckdb_connection connection);
+/* bam_bed_coverage.c */
+extern void register_duckhts_bam_bed_coverage_function(duckdb_connection connection);
+/* cgranges_api.c */
+extern void register_duckhts_cgranges_functions(duckdb_connection connection, duckdb_database database);
 
 static bool run_sql_or_fail(duckdb_connection connection, const char *sql) {
     duckdb_result result;
@@ -99,6 +111,7 @@ DUCKDB_EXTENSION_ENTRYPOINT(duckdb_connection connection,
                             struct duckdb_extension_access* access) {
     (void)info;
     (void)access;
+    register_wasm_http_hfile_backend();
 
     register_read_bcf_function(connection);
     register_read_bam_function(connection);
@@ -123,10 +136,32 @@ DUCKDB_EXTENSION_ENTRYPOINT(duckdb_connection connection,
     register_read_hts_index_spans_function(connection);
     register_detect_quality_encoding_function(connection);
     register_bcftools_score_function(connection);
+    register_duckhts_mosdepth_function(connection);
+    register_bam_bin_counts_function(connection);
+    register_duckhts_samtools_idxstats_function(connection);
+    register_duckhts_bam_bed_coverage_function(connection);
+    register_duckhts_cgranges_functions(connection, *access->get_database(info));
     if (!run_sql_or_fail(connection,
         "CREATE OR REPLACE MACRO duckhts_quote_ident(x) AS "
         "CASE WHEN x IS NULL THEN NULL ELSE '\"' || replace(x, '\"', '\"\"') || '\"' END")) {
         return false;
+    }
+    {
+        static const char *const hts_union_query_sql[] = {
+            "CREATE OR REPLACE MACRO hts_union_query(reader, pattern, params := '') AS (",
+            "(SELECT string_agg(",
+            "'SELECT ''' || replace(file, '''', '''''') || ''' AS filename, * FROM ' ",
+            "|| reader || '(''' || replace(file, '''', '''''') || '''' ",
+            "|| CASE WHEN length(params) > 0 THEN ', ' || params ELSE '' END ",
+            "|| ')', ",
+            "' UNION ALL BY NAME '",
+            ") FROM glob(pattern) g(file))",
+            ")"
+        };
+        if (!run_sql_parts_or_fail(connection, hts_union_query_sql,
+                                    sizeof(hts_union_query_sql) / sizeof(hts_union_query_sql[0]))) {
+            return false;
+        }
     }
     if (!run_sql_or_fail(connection,
         "CREATE OR REPLACE MACRO duckdb_munge_preset_map(preset) AS "
