@@ -15,6 +15,11 @@
  *   read_fasta(path) → (NAME VARCHAR, DESCRIPTION VARCHAR, SEQUENCE VARCHAR)
  *   read_fastq(path) → (NAME VARCHAR, DESCRIPTION VARCHAR, SEQUENCE VARCHAR, QUALITY VARCHAR)
  *
+ * read_fasta named parameters:
+ *   - region := 'chr:start-end[,chr2:...]' for indexed faidx fetches
+ *   - index_path := explicit .fai path
+ *   - gzi_path := explicit BGZF .gzi path for bgzipped FASTA
+ *
  * Note: htslib's FASTA/FASTQ reader stores the comment/description in
  * bam_get_l_aux(b) area as a "CO" aux tag when present.
  */
@@ -34,6 +39,7 @@ DUCKDB_EXTENSION_EXTERN
 #include <htslib/kseq.h>
 #include <htslib/kstring.h>
 
+#include "include/hts_io_tuning.h"
 #include "include/seq_encoding.h"
 #include "include/quality_encoding.h"
 
@@ -59,6 +65,7 @@ typedef struct {
     char *file_path;
     char *mate_path;
     char *index_path;
+    char *gzi_path;
     char *region;
     char **regions;
     unsigned int n_regions;
@@ -128,6 +135,7 @@ static void destroy_seq_bind(void *data) {
     if (b->file_path) duckdb_free(b->file_path);
     if (b->mate_path) duckdb_free(b->mate_path);
     if (b->index_path) duckdb_free(b->index_path);
+    if (b->gzi_path) duckdb_free(b->gzi_path);
     if (b->region) duckdb_free(b->region);
     if (b->regions) {
         for (unsigned int i = 0; i < b->n_regions; i++) {
@@ -211,6 +219,19 @@ static char *strdup_duckdb(const char *s) {
     char *copy = (char *)duckdb_malloc(len);
     if (copy) memcpy(copy, s, len);
     return copy;
+}
+
+static char *default_fasta_index_path(const char *path) {
+    size_t path_len;
+    char *out;
+
+    if (!path) return NULL;
+    path_len = strlen(path);
+    out = (char *)duckdb_malloc(path_len + 5);
+    if (!out) return NULL;
+    memcpy(out, path, path_len);
+    memcpy(out + path_len, ".fai", 5);
+    return out;
 }
 
 static void parse_regions_duckdb(const char *region_str, char ***out_regions, unsigned int *out_count) {
@@ -395,6 +416,12 @@ static void seq_read_bind(duckdb_bind_info info, int is_fastq) {
             bind->index_path = duckdb_get_varchar(index_val);
         }
         if (index_val) duckdb_destroy_value(&index_val);
+
+        duckdb_value gzi_val = duckdb_bind_get_named_parameter(info, "gzi_path");
+        if (gzi_val && !duckdb_is_null_value(gzi_val)) {
+            bind->gzi_path = duckdb_get_varchar(gzi_val);
+        }
+        if (gzi_val) duckdb_destroy_value(&gzi_val);
     }
 
     /* sequence_encoding — shared by both FASTA and FASTQ */
@@ -558,7 +585,8 @@ static void seq_read_init(duckdb_init_info info) {
                 return;
             }
         } else if (!bind->is_fastq) {
-            faidx_t *fai_count = fai_load3_format(bind->file_path, bind->index_path, NULL, 0, FAI_FASTA);
+            faidx_t *fai_count = fai_load3_format(bind->file_path, bind->index_path,
+                                                  bind->gzi_path, 0, FAI_FASTA);
             if (fai_count) {
                 init->count_only = 1;
                 init->count_remaining = (uint64_t)faidx_nseq(fai_count);
@@ -575,6 +603,8 @@ static void seq_read_init(duckdb_init_info info) {
                 destroy_seq_init(init);
                 return;
             }
+            duckhts_apply_remote_hts_tuning(init->count_fp, bind->file_path,
+                                            DUCKHTS_HTS_IO_PROFILE_STREAMING);
             init->done = 0;
             duckdb_init_set_max_threads(info, 1);
             duckdb_init_set_init_data(info, init, destroy_seq_init);
@@ -590,6 +620,8 @@ static void seq_read_init(duckdb_init_info info) {
             destroy_seq_init(init);
             return;
         }
+        duckhts_apply_remote_hts_tuning(init->count_fp, bind->file_path,
+                                        DUCKHTS_HTS_IO_PROFILE_STREAMING);
         if (bind->paired) {
             init->count_fp_mate = hts_open(bind->mate_path, "r");
             if (!init->count_fp_mate) {
@@ -597,6 +629,8 @@ static void seq_read_init(duckdb_init_info info) {
                 destroy_seq_init(init);
                 return;
             }
+            duckhts_apply_remote_hts_tuning(init->count_fp_mate, bind->mate_path,
+                                            DUCKHTS_HTS_IO_PROFILE_STREAMING);
         }
         init->done = 0;
         duckdb_init_set_max_threads(info, 1);
@@ -611,6 +645,8 @@ static void seq_read_init(duckdb_init_info info) {
         destroy_seq_init(init);
         return;
     }
+    duckhts_apply_remote_hts_tuning(init->fp, bind->file_path,
+                                    DUCKHTS_HTS_IO_PROFILE_STREAMING);
 
     /* sam_hdr_read for FASTA/FASTQ returns a valid (possibly empty) header */
     init->hdr = sam_hdr_read(init->fp);
@@ -630,6 +666,8 @@ static void seq_read_init(duckdb_init_info info) {
             destroy_seq_init(init);
             return;
         }
+        duckhts_apply_remote_hts_tuning(init->fp_mate, bind->mate_path,
+                                        DUCKHTS_HTS_IO_PROFILE_STREAMING);
         init->hdr_mate = sam_hdr_read(init->fp_mate);
         if (!init->hdr_mate) {
             duckdb_init_set_error(info, "Failed to read mate FASTQ header");
@@ -640,12 +678,15 @@ static void seq_read_init(duckdb_init_info info) {
     }
 
     if (!bind->is_fastq && bind->n_regions > 0) {
-        init->fai = fai_load3_format(bind->file_path, bind->index_path, NULL, 0, FAI_FASTA);
+        init->fai = fai_load3_format(bind->file_path, bind->index_path,
+                                     bind->gzi_path, 0, FAI_FASTA);
         if (!init->fai) {
             duckdb_init_set_error(info, "read_fasta: region query requires a FASTA index (.fai); run fasta_index(path) first");
             destroy_seq_init(init);
             return;
         }
+        duckhts_apply_remote_faidx_tuning(init->fai, bind->file_path,
+                                          DUCKHTS_HTS_IO_PROFILE_INDEXED_REGION);
     }
 
     init->done = 0;
@@ -1112,6 +1153,7 @@ void register_read_fasta_function(duckdb_connection connection) {
     duckdb_table_function_add_parameter(tf, varchar_type);
     duckdb_table_function_add_named_parameter(tf, "region", varchar_type);
     duckdb_table_function_add_named_parameter(tf, "index_path", varchar_type);
+    duckdb_table_function_add_named_parameter(tf, "gzi_path", varchar_type);
     duckdb_table_function_add_named_parameter(tf, "sequence_encoding", varchar_type);
     duckdb_destroy_logical_type(&varchar_type);
 
@@ -1162,6 +1204,15 @@ static void fasta_index_bind(duckdb_bind_info info) {
         return;
     }
 
+    if (!index_path) {
+        index_path = default_fasta_index_path(file_path);
+        if (!index_path) {
+            duckdb_bind_set_error(info, "fasta_index: out of memory");
+            duckdb_free(file_path);
+            return;
+        }
+    }
+
     duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
     duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
     duckdb_bind_add_result_column(info, "success", bool_type);
@@ -1170,7 +1221,7 @@ static void fasta_index_bind(duckdb_bind_info info) {
     duckdb_destroy_logical_type(&varchar_type);
 
     fasta_index_bind_t *bind = (fasta_index_bind_t *)duckdb_malloc(sizeof(fasta_index_bind_t));
-    bind->index_path = index_path ? index_path : strdup_duckdb("");
+    bind->index_path = index_path;
     bind->emitted = 0;
     duckdb_bind_set_bind_data(info, bind, destroy_fasta_index_bind);
     duckdb_free(file_path);

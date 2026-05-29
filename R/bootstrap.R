@@ -40,9 +40,11 @@ duckhts_bootstrap <- function(repo_root = NULL) {
     "duckhts.c",
     "bcf_reader.c",
     "bam_reader.c",
+    "bam_pileup.c",
     "bgzip.c",
     "hts_index_builder.c",
     "liftover_udf.c",
+    "bcftools_norm_udf.c",
     "munge_udf.c",
     "kmer_udf.c",
     "interval_udf.c",
@@ -56,6 +58,7 @@ duckhts_bootstrap <- function(repo_root = NULL) {
     "samtools_idxstats_table.c",
     "bam_bed_coverage.c",
     "cgranges_api.c",
+    "variantkey_udf.c",
     "bcftools_filter.c",
     "bcftools_shim.c",
     "score_udf.c",
@@ -63,7 +66,18 @@ duckhts_bootstrap <- function(repo_root = NULL) {
     "wasm_http_hfile.c"
   )
   file.copy(file.path(src_dir, c_files), dest)
-  message("  Copied ", length(c_files), " C source files")
+  simd_files <- c(
+    "duckhts_simd_dispatch.c",
+    "duckhts_simd_scalar.c",
+    "duckhts_simd_avx2.c",
+    "duckhts_simd_avx512.c",
+    "duckhts_simd_neon.c",
+    "duckhts_simd_wasm_simd128.c"
+  )
+  simd_dest <- file.path(dest, "simd")
+  dir.create(simd_dest, recursive = TRUE, showWarnings = FALSE)
+  file.copy(file.path(src_dir, "simd", simd_files), simd_dest)
+  message("  Copied ", length(c_files) + length(simd_files), " C source files")
 
   # Headers
   inc_dest <- file.path(dest, "include")
@@ -72,7 +86,12 @@ duckhts_bootstrap <- function(repo_root = NULL) {
   file.copy(file.path(src_dir, "include", inc_files), inc_dest)
   cgranges_dir <- file.path(repo_root, "third_party", "cgranges")
   file.copy(file.path(cgranges_dir, c("cgranges.h", "khash.h")), inc_dest)
-  message("  Copied ", length(inc_files) + 2L, " header files")
+  variantkey_inc_dest <- file.path(inc_dest, "variantkey")
+  dir.create(variantkey_inc_dest, showWarnings = FALSE)
+  variantkey_dir <- file.path(repo_root, "third_party", "variantkey", "include", "variantkey")
+  variantkey_files <- c("hex.h", "variantkey.h", "regionkey.h")
+  file.copy(file.path(variantkey_dir, variantkey_files), variantkey_inc_dest)
+  message("  Copied ", length(inc_files) + 2L + length(variantkey_files), " header files")
 
   # Vendored cgranges C source
   file.copy(file.path(repo_root, "third_party", "cgranges", "cgranges.c"), dest)
@@ -231,11 +250,19 @@ duckhts_build <- function(build_dir = NULL, make = NULL, force = FALSE, verbose 
     ext_dir,
     c(
       "duckhts.c",
+      file.path("simd", "duckhts_simd_dispatch.c"),
+      file.path("simd", "duckhts_simd_scalar.c"),
+      file.path("simd", "duckhts_simd_avx2.c"),
+      file.path("simd", "duckhts_simd_avx512.c"),
+      file.path("simd", "duckhts_simd_neon.c"),
+      file.path("simd", "duckhts_simd_wasm_simd128.c"),
       "bcf_reader.c",
       "bam_reader.c",
+      "bam_pileup.c",
       "bgzip.c",
       "hts_index_builder.c",
       "liftover_udf.c",
+      "bcftools_norm_udf.c",
       "munge_udf.c",
       "kmer_udf.c",
       "interval_udf.c",
@@ -249,6 +276,7 @@ duckhts_build <- function(build_dir = NULL, make = NULL, force = FALSE, verbose 
       "samtools_idxstats_table.c",
       "bam_bed_coverage.c",
       "cgranges_api.c",
+      "variantkey_udf.c",
       "cgranges.c",
       "bcftools_filter.c",
       "bcftools_shim.c",

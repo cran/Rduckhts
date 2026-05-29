@@ -48,13 +48,116 @@
   },
   "functions": [
     {
+      "name": "duckhts_simd_backend",
+      "kind": "scalar",
+      "category": "Diagnostics",
+      "signature": "duckhts_simd_backend()",
+      "returns": "VARCHAR",
+      "r_wrapper": "rduckhts_simd_backend",
+      "description": "Return the current DuckHTS SIMD dispatch label. For explicit scalar or concrete backend requests this is the requested policy; for auto it is the single selected backend when all logical kernels resolve to the same backend, or mixed when per-kernel auto-dispatch resolves to multiple backends. Use duckhts_simd_kernel_info() for per-kernel details.",
+      "examples": [
+        "SELECT duckhts_simd_backend();"
+      ]
+    },
+    {
+      "name": "duckhts_simd_requested_backend",
+      "kind": "scalar",
+      "category": "Diagnostics",
+      "signature": "duckhts_simd_requested_backend()",
+      "returns": "VARCHAR",
+      "r_wrapper": "rduckhts_simd_requested_backend",
+      "description": "Return the current explicit SIMD backend request, usually auto unless `SELECT backend FROM duckhts_simd_set_backend('auto'|'scalar'|backend)` was called. The selected per-kernel backend may differ under auto-dispatch across x86, ARM, wasm, and scalar-only builds.",
+      "examples": [
+        "SELECT duckhts_simd_requested_backend();"
+      ]
+    },
+    {
+      "name": "duckhts_simd_backend_compiled",
+      "kind": "scalar",
+      "category": "Diagnostics",
+      "signature": "duckhts_simd_backend_compiled(backend)",
+      "returns": "BOOLEAN",
+      "r_wrapper": "rduckhts_simd_backend_compiled",
+      "description": "Return whether a concrete DuckHTS SIMD backend was compiled into this build. This is independent of whether the current CPU/runtime supports executing that backend; for example avx512 can be compiled but not CPU-supported on the running host.",
+      "examples": [
+        "SELECT duckhts_simd_backend_compiled('scalar');",
+        "SELECT duckhts_simd_backend_compiled('avx512');"
+      ]
+    },
+    {
+      "name": "duckhts_simd_backend_cpu_supported",
+      "kind": "scalar",
+      "category": "Diagnostics",
+      "signature": "duckhts_simd_backend_cpu_supported(backend)",
+      "returns": "BOOLEAN",
+      "r_wrapper": "rduckhts_simd_backend_cpu_supported",
+      "description": "Return whether the current CPU/runtime supports a concrete DuckHTS SIMD backend, independent of whether DuckHTS compiled an implementation for it. Availability is the intersection of compiled and CPU-supported.",
+      "examples": [
+        "SELECT duckhts_simd_backend_cpu_supported('avx2');",
+        "SELECT duckhts_simd_backend_cpu_supported('avx512');"
+      ]
+    },
+    {
+      "name": "duckhts_simd_backend_available",
+      "kind": "scalar",
+      "category": "Diagnostics",
+      "signature": "duckhts_simd_backend_available(backend)",
+      "returns": "BOOLEAN",
+      "r_wrapper": "rduckhts_simd_backend_available",
+      "description": "Return whether a concrete SIMD backend is usable in the current process. Availability means the backend is compiled into DuckHTS and supported by the current CPU/runtime. auto is a selection request rather than a concrete backend and is not reported as available here.",
+      "examples": [
+        "SELECT duckhts_simd_backend_available('scalar');",
+        "SELECT duckhts_simd_backend_available('avx2');",
+        "SELECT duckhts_simd_backend_available('avx512');"
+      ]
+    },
+    {
+      "name": "duckhts_simd_info",
+      "kind": "table",
+      "category": "Diagnostics",
+      "signature": "duckhts_simd_info()",
+      "returns": "table",
+      "r_wrapper": "rduckhts_simd_info",
+      "description": "Return one row per known concrete DuckHTS SIMD backend with extension-owned selectable, compiled, CPU-supported, available, selected, requested, and dispatch-mode diagnostics. Availability is the intersection of compiled and CPU/runtime-supported. selectable reports whether the backend has a selectable implementation path; explicit selection still requires available = TRUE. selected is TRUE when the current dispatch table uses that backend for at least one logical kernel. auto is a selection request and is not a concrete backend row.",
+      "examples": [
+        "SELECT * FROM duckhts_simd_info();",
+        "SELECT backend FROM duckhts_simd_info() WHERE available;"
+      ]
+    },
+    {
+      "name": "duckhts_simd_kernel_info",
+      "kind": "table",
+      "category": "Diagnostics",
+      "signature": "duckhts_simd_kernel_info()",
+      "returns": "table",
+      "r_wrapper": "rduckhts_simd_kernel_info",
+      "description": "Return one row per logical DuckHTS SIMD kernel showing the concrete backend selected by the current immutable dispatch table, the selected capability, the requested backend policy, whether scalar was used as a per-kernel fallback, and the dispatch mode. This is the authoritative diagnostic for mixed auto-dispatch when different kernels resolve to different backends.",
+      "examples": [
+        "SELECT * FROM duckhts_simd_kernel_info();",
+        "SELECT kernel, selected_backend FROM duckhts_simd_kernel_info();"
+      ]
+    },
+    {
+      "name": "duckhts_simd_set_backend",
+      "kind": "table",
+      "category": "Diagnostics",
+      "signature": "duckhts_simd_set_backend(backend)",
+      "returns": "table(backend VARCHAR)",
+      "r_wrapper": "rduckhts_simd_set_backend",
+      "description": "Explicitly select the DuckHTS SIMD dispatch policy for this process using a one-row table-function call and return the current dispatch label in a backend column. Use auto for per-kernel runtime dispatch or scalar for a portable baseline; unavailable platform-specific requests such as avx512 on non-AVX-512 CPUs raise an error instead of silently falling back.",
+      "examples": [
+        "SELECT backend FROM duckhts_simd_set_backend('scalar');",
+        "SELECT backend FROM duckhts_simd_set_backend('auto');"
+      ]
+    },
+    {
       "name": "read_bcf",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_bcf(path, region := NULL, index_path := NULL, tidy_format := FALSE, additional_csq_column_types := NULL)",
+      "signature": "read_bcf(path, region := NULL, index_path := NULL, tidy_format := FALSE, additional_csq_column_types := NULL, decompression_threads := 0)",
       "returns": "table",
       "r_wrapper": "rduckhts_bcf",
-      "description": "Read VCF and BCF variant data with typed INFO, FORMAT, typed CSQ/ANN/BCSQ subfields, optional tidy sample output, and optional bcftools-style CSQ type overrides.",
+      "description": "Read VCF and BCF variant data with typed INFO, FORMAT, typed CSQ/ANN/BCSQ subfields, optional tidy sample output, optional bcftools-style CSQ type overrides, and optional htslib decompression worker threads via decompression_threads (default 0 for single-threaded reads).",
       "examples": [
         "SELECT CHROM, POS, REF, ALT FROM read_bcf('vcf_file.bcf') LIMIT 5;"
       ]
@@ -63,22 +166,34 @@
       "name": "read_bam",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_bam(path, standard_tags := FALSE, auxiliary_tags := FALSE, region := NULL, index_path := NULL, reference := NULL, sequence_encoding := 'string', quality_representation := 'string', decompression_threads := 2)",
+      "signature": "read_bam(path, standard_tags := FALSE, auxiliary_tags := FALSE, region := NULL, index_path := NULL, reference := NULL, sequence_encoding := 'string', quality_representation := 'string', cigar_representation := 'string', decompression_threads := 2)",
       "returns": "table",
       "r_wrapper": "rduckhts_bam",
-      "description": "Read SAM, BAM, and CRAM alignments with optional typed SAMtags and auxiliary tag maps. Use sequence_encoding := 'nt16' to return SEQ as UTINYINT[] and quality_representation := 'phred' to return QUAL as UTINYINT[] instead of VARCHAR. decompression_threads controls per-file htslib worker threads and defaults to 2; use 0 to disable worker threads.",
+      "description": "Read SAM, BAM, and CRAM alignments with optional typed SAMtags and auxiliary tag maps. Use sequence_encoding := 'nt16' to return SEQ as UTINYINT[], quality_representation := 'phred' to return QUAL as UTINYINT[], and cigar_representation := 'binary' to return packed BAM CIGAR operations as UINTEGER[] instead of SAM text. decompression_threads controls per-file htslib worker threads and defaults to 2; use 0 to disable worker threads.",
       "examples": [
         "SELECT QNAME, FLAG, RNAME, POS FROM read_bam('range.bam') LIMIT 5;"
+      ]
+    },
+    {
+      "name": "read_pileup",
+      "kind": "table",
+      "category": "Coverage",
+      "signature": "read_pileup(path, region := NULL, index_path := NULL, min_mapq := 0, flag_mask := 1796)",
+      "returns": "table",
+      "r_wrapper": "rduckhts_pileup",
+      "description": "Construct a region-scoped BAM pileup with one row per covered position, emitting chrom, 1-based position, depth, observed bases, and Phred+33 qualities after SAM flag and MAPQ filtering. This is a compact htslib pileup view, not samtools mpileup text parity.",
+      "examples": [
+        "SELECT chrom, pos, depth FROM read_pileup('range.bam', region := 'CHROMOSOME_I:1-200') LIMIT 5;"
       ]
     },
     {
       "name": "read_fasta",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_fasta(path, region := NULL, index_path := NULL, sequence_encoding := 'string')",
+      "signature": "read_fasta(path, region := NULL, index_path := NULL, gzi_path := NULL, sequence_encoding := 'string')",
       "returns": "table",
       "r_wrapper": "rduckhts_fasta",
-      "description": "Read FASTA records or indexed FASTA regions as sequence rows. Use sequence_encoding := 'nt16' to return SEQUENCE as UTINYINT[] (htslib nt16 4-bit codes) instead of VARCHAR.",
+      "description": "Read FASTA records or indexed FASTA regions as sequence rows. Use sequence_encoding := 'nt16' to return SEQUENCE as UTINYINT[] (htslib nt16 4-bit codes) instead of VARCHAR. For bgzipped FASTA, gzi_path may point to an explicit .gzi sidecar when it is not colocated with the FASTA.",
       "examples": [
         "SELECT NAME, length(SEQUENCE) FROM read_fasta('ce.fa');"
       ]
@@ -99,10 +214,10 @@
       "name": "fasta_nuc",
       "kind": "table",
       "category": "Readers",
-      "signature": "fasta_nuc(path, bed_path := NULL, bin_width := NULL, region := NULL, index_path := NULL, bed_index_path := NULL, include_seq := FALSE)",
+      "signature": "fasta_nuc(path, bed_path := NULL, bin_width := NULL, region := NULL, index_path := NULL, gzi_path := NULL, bed_index_path := NULL, include_seq := FALSE)",
       "returns": "table",
       "r_wrapper": "rduckhts_fasta_nuc",
-      "description": "Compute bedtools nuc-style nucleotide composition for supplied BED intervals or generated fixed-width bins over a FASTA reference.",
+      "description": "Compute bedtools nuc-style nucleotide composition for supplied BED intervals or generated fixed-width bins over a FASTA reference. For bgzipped FASTA, gzi_path may point to an explicit .gzi sidecar when it is not colocated with the FASTA.",
       "examples": [
         "SELECT chrom, start, \"end\", pct_gc FROM fasta_nuc('ce.fa', bin_width := 1000) LIMIT 5;"
       ]
@@ -468,6 +583,294 @@
       ]
     },
     {
+      "name": "variantkey",
+      "kind": "scalar",
+      "category": "Variants",
+      "signature": "variantkey(chrom, pos, ref, alt)",
+      "returns": "UBIGINT",
+      "r_wrapper": "",
+      "description": "Encode a normalized biallelic variant as an official VariantKey-compatible 64-bit unsigned integer. This DuckHTS wrapper accepts 1-based VCF/DuckHTS POS to match bcftools `%VKX` / `+add-variantkey`, internally converts to the upstream 0-based field, and preserves the official hashed nonreversible mode for large, ambiguous, and symbolic REF/ALT strings. Only CHROM, POS, REF, and ALT are encoded; END, SVLEN, mate breakend coordinates, and other SV metadata are not.",
+      "examples": [
+        "SELECT variantkey_hex(variantkey('1', 324684, 'C', 'G'));"
+      ]
+    },
+    {
+      "name": "variantkey_hex",
+      "kind": "scalar",
+      "category": "Variants",
+      "signature": "variantkey_hex(vk)",
+      "returns": "VARCHAR",
+      "r_wrapper": "",
+      "description": "Render a VariantKey as its lowercase 16-character hexadecimal string representation.",
+      "examples": [
+        "SELECT variantkey_hex(variantkey('1', 324684, 'C', 'G'));"
+      ]
+    },
+    {
+      "name": "parse_variantkey_hex",
+      "kind": "scalar",
+      "category": "Variants",
+      "signature": "parse_variantkey_hex(hex)",
+      "returns": "UBIGINT",
+      "r_wrapper": "",
+      "description": "Parse a 16-character hexadecimal VariantKey string back into its UBIGINT code. Invalid or non-hex strings return NULL.",
+      "examples": [
+        "SELECT parse_variantkey_hex('08027a2588b00000');"
+      ]
+    },
+    {
+      "name": "encode_variantkey",
+      "kind": "scalar",
+      "category": "Variants",
+      "signature": "encode_variantkey(chrom_code, pos0, refalt_code)",
+      "returns": "UBIGINT",
+      "r_wrapper": "",
+      "description": "Encode the raw upstream VariantKey fields directly: chromosome code, 0-based position, and 31-bit REF+ALT code.",
+      "examples": [
+        "SELECT variantkey_hex(encode_variantkey(1, 324683, 145752064));"
+      ]
+    },
+    {
+      "name": "extract_variantkey_chrom",
+      "kind": "scalar",
+      "category": "Variants",
+      "signature": "extract_variantkey_chrom(vk)",
+      "returns": "UTINYINT",
+      "r_wrapper": "",
+      "description": "Extract the raw upstream VariantKey chromosome code.",
+      "examples": [
+        "SELECT extract_variantkey_chrom(parse_variantkey_hex('08027a2588b00000'));"
+      ]
+    },
+    {
+      "name": "extract_variantkey_pos",
+      "kind": "scalar",
+      "category": "Variants",
+      "signature": "extract_variantkey_pos(vk)",
+      "returns": "UINTEGER",
+      "r_wrapper": "",
+      "description": "Extract the raw upstream VariantKey 0-based position field.",
+      "examples": [
+        "SELECT extract_variantkey_pos(parse_variantkey_hex('08027a2588b00000'));"
+      ]
+    },
+    {
+      "name": "extract_variantkey_refalt",
+      "kind": "scalar",
+      "category": "Variants",
+      "signature": "extract_variantkey_refalt(vk)",
+      "returns": "UINTEGER",
+      "r_wrapper": "",
+      "description": "Extract the raw upstream 31-bit VariantKey REF+ALT code.",
+      "examples": [
+        "SELECT extract_variantkey_refalt(parse_variantkey_hex('08027a2588b00000'));"
+      ]
+    },
+    {
+      "name": "decode_variantkey",
+      "kind": "scalar",
+      "category": "Variants",
+      "signature": "decode_variantkey(vk)",
+      "returns": "STRUCT",
+      "r_wrapper": "",
+      "description": "Decode a VariantKey into its raw upstream numeric fields: chrom_code, pos0, and refalt_code.",
+      "examples": [
+        "SELECT (decode_variantkey(parse_variantkey_hex('08027a2588b00000'))).pos0;"
+      ]
+    },
+    {
+      "name": "reverse_variantkey",
+      "kind": "scalar",
+      "category": "Variants",
+      "signature": "reverse_variantkey(vk)",
+      "returns": "STRUCT",
+      "r_wrapper": "",
+      "description": "Decode a VariantKey into a STRUCT with chrom, chrom_code, 1-based pos, upstream 0-based pos0, ref, alt, refalt_code, and reversible. For hashed nonreversible keys, reversible is FALSE and ref/alt are returned as NULL because DuckHTS v1 does not ship the optional NRVK lookup sidecar.",
+      "examples": [
+        "SELECT (reverse_variantkey(parse_variantkey_hex('08027a2588b00000'))).ref;"
+      ]
+    },
+    {
+      "name": "variantkey_range",
+      "kind": "scalar",
+      "category": "Variants",
+      "signature": "variantkey_range(chrom, pos_min, pos_max)",
+      "returns": "STRUCT",
+      "r_wrapper": "",
+      "description": "Return the inclusive minimum and maximum VariantKey bounds for a chromosome plus 1-based VCF position range, suitable for numeric range filtering on precomputed VariantKeys.",
+      "examples": [
+        "SELECT variantkey_hex((variantkey_range('1', 100, 100)).min), variantkey_hex((variantkey_range('1', 100, 100)).max);"
+      ]
+    },
+    {
+      "name": "regionkey",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "regionkey(chrom, start, end, strand := 0)",
+      "returns": "UBIGINT",
+      "r_wrapper": "",
+      "description": "Encode a genomic interval as an official RegionKey-compatible 64-bit unsigned integer. Start and end use 0-based half-open interval semantics, matching BED-style coordinates; strand accepts -1, 0, or 1.",
+      "examples": [
+        "SELECT regionkey_hex(regionkey('X', 1007, 1807, 1));"
+      ]
+    },
+    {
+      "name": "regionkey_hex",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "regionkey_hex(rk)",
+      "returns": "VARCHAR",
+      "r_wrapper": "",
+      "description": "Render a RegionKey as its lowercase 16-character hexadecimal string representation.",
+      "examples": [
+        "SELECT regionkey_hex(regionkey('X', 1007, 1807, 1));"
+      ]
+    },
+    {
+      "name": "parse_regionkey_hex",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "parse_regionkey_hex(hex)",
+      "returns": "UBIGINT",
+      "r_wrapper": "",
+      "description": "Parse a 16-character hexadecimal RegionKey string back into its UBIGINT code. Invalid or non-hex strings return NULL.",
+      "examples": [
+        "SELECT parse_regionkey_hex('b80001f78000387a');"
+      ]
+    },
+    {
+      "name": "encode_regionkey",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "encode_regionkey(chrom_code, start, end, strand_code)",
+      "returns": "UBIGINT",
+      "r_wrapper": "",
+      "description": "Encode the raw upstream RegionKey fields directly: chromosome code, 0-based start, 0-based end, and strand code (0 = unknown, 1 = +, 2 = -).",
+      "examples": [
+        "SELECT regionkey_hex(encode_regionkey(23, 1007, 1807, 1));"
+      ]
+    },
+    {
+      "name": "extract_regionkey_chrom",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "extract_regionkey_chrom(rk)",
+      "returns": "UTINYINT",
+      "r_wrapper": "",
+      "description": "Extract the raw upstream RegionKey chromosome code.",
+      "examples": [
+        "SELECT extract_regionkey_chrom(parse_regionkey_hex('b80001f78000387a'));"
+      ]
+    },
+    {
+      "name": "extract_regionkey_startpos",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "extract_regionkey_startpos(rk)",
+      "returns": "UINTEGER",
+      "r_wrapper": "",
+      "description": "Extract the raw upstream RegionKey 0-based start position.",
+      "examples": [
+        "SELECT extract_regionkey_startpos(parse_regionkey_hex('b80001f78000387a'));"
+      ]
+    },
+    {
+      "name": "extract_regionkey_endpos",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "extract_regionkey_endpos(rk)",
+      "returns": "UINTEGER",
+      "r_wrapper": "",
+      "description": "Extract the raw upstream RegionKey 0-based end position.",
+      "examples": [
+        "SELECT extract_regionkey_endpos(parse_regionkey_hex('b80001f78000387a'));"
+      ]
+    },
+    {
+      "name": "extract_regionkey_strand",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "extract_regionkey_strand(rk)",
+      "returns": "UTINYINT",
+      "r_wrapper": "",
+      "description": "Extract the raw upstream RegionKey strand code (0 = unknown, 1 = +, 2 = -).",
+      "examples": [
+        "SELECT extract_regionkey_strand(parse_regionkey_hex('b80001f78000387a'));"
+      ]
+    },
+    {
+      "name": "decode_regionkey",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "decode_regionkey(rk)",
+      "returns": "STRUCT",
+      "r_wrapper": "",
+      "description": "Decode a RegionKey into its raw upstream numeric fields: chrom_code, start, end, and strand_code.",
+      "examples": [
+        "SELECT (decode_regionkey(parse_regionkey_hex('b80001f78000387a'))).strand_code;"
+      ]
+    },
+    {
+      "name": "reverse_regionkey",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "reverse_regionkey(rk)",
+      "returns": "STRUCT",
+      "r_wrapper": "",
+      "description": "Decode a RegionKey into a STRUCT with chrom, chrom_code, start, end, strand, and strand_code.",
+      "examples": [
+        "SELECT (reverse_regionkey(parse_regionkey_hex('b80001f78000387a'))).strand;"
+      ]
+    },
+    {
+      "name": "extend_regionkey",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "extend_regionkey(rk, size)",
+      "returns": "UBIGINT",
+      "r_wrapper": "",
+      "description": "Extend a RegionKey interval by a fixed number of bases on both sides, clamping to the official 28-bit RegionKey position range.",
+      "examples": [
+        "SELECT reverse_regionkey(extend_regionkey(regionkey('X', 10000, 20000, -1), 1000));"
+      ]
+    },
+    {
+      "name": "are_overlapping_regions",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "are_overlapping_regions(chrom_a, start_a, end_a, chrom_b, start_b, end_b)",
+      "returns": "BOOLEAN",
+      "r_wrapper": "",
+      "description": "Return TRUE when two explicit 0-based half-open intervals overlap on the same canonical chromosome.",
+      "examples": [
+        "SELECT are_overlapping_regions('1', 2, 4, '1', 3, 7);"
+      ]
+    },
+    {
+      "name": "are_overlapping_region_regionkey",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "are_overlapping_region_regionkey(chrom, start, end, rk)",
+      "returns": "BOOLEAN",
+      "r_wrapper": "",
+      "description": "Return TRUE when a 0-based half-open interval overlaps the supplied RegionKey interval.",
+      "examples": [
+        "SELECT are_overlapping_region_regionkey('X', 1008, 1800, parse_regionkey_hex('b80001f78000387a'));"
+      ]
+    },
+    {
+      "name": "are_overlapping_regionkeys",
+      "kind": "scalar",
+      "category": "Intervals",
+      "signature": "are_overlapping_regionkeys(rka, rkb)",
+      "returns": "BOOLEAN",
+      "r_wrapper": "",
+      "description": "Return TRUE when two RegionKeys overlap.",
+      "examples": [
+        "SELECT are_overlapping_regionkeys(regionkey('X', 1007, 1807, 1), parse_regionkey_hex('b80001f78000387a'));"
+      ]
+    },
+    {
       "name": "bcftools_liftover",
       "kind": "scalar",
       "category": "Variants",
@@ -490,6 +893,31 @@
       "examples": [
         "SELECT * FROM duckdb_liftover('variants', 'chrom', 'pos', ref_col := 'ref', alt_col := 'alt', chain_path := 'hg19ToHg38.over.chain.gz', dst_fasta_ref := 'hg38.fa');",
         "SELECT * FROM duckdb_liftover('(SELECT chrom, pos, ref, alt FROM variants) AS v', 'chrom', 'pos', ref_col := 'ref', alt_col := 'alt', chain_path := 'hg19ToHg38.over.chain.gz', dst_fasta_ref := 'hg38.fa');"
+      ]
+    },
+    {
+      "name": "bcftools_norm_row",
+      "kind": "scalar",
+      "category": "Variants",
+      "signature": "bcftools_norm_row(chrom, pos, ref, alt, fasta_ref, end_pos := NULL, svlen := NULL, fasta_index_path := NULL, gzi_path := NULL)",
+      "returns": "STRUCT",
+      "r_wrapper": "",
+      "description": "Normalize one variant row with bcftools/vt-style left-alignment semantics against a FASTA reference. The alt argument may be either a comma-delimited VARCHAR or a VARCHAR[] list. The returned STRUCT contains pos_normed, end_pos_normed, ref_normed, alt_normed (always VARCHAR[]), normed (TRUE/FALSE/NULL), and norm_status. Symbolic <DEL> rows can use end_pos, and symbolic <DUP> rows can use svlen.",
+      "examples": [
+        "SELECT nr.pos_normed, nr.ref_normed, nr.alt_normed FROM (SELECT bcftools_norm_row('chr1', 100, 'AC', 'A', 'ref.fa', NULL::BIGINT, NULL::BIGINT, NULL, NULL) AS nr);"
+      ]
+    },
+    {
+      "name": "duckhts_bcftools_norm",
+      "kind": "table_macro",
+      "category": "Variants",
+      "signature": "duckhts_bcftools_norm(table_name, fasta_ref, chrom_col := 'chrom', pos_col := 'pos', ref_col := 'ref', alt_col := 'alt', split_multiallelic := FALSE, end_pos_col := NULL, svlen_col := NULL, fasta_index_path := NULL, gzi_path := NULL)",
+      "returns": "table",
+      "r_wrapper": "rduckhts_bcftools_norm",
+      "description": "DuckDB table macro wrapper over bcftools_norm_row that normalizes variants from a table or derived-table expression while preserving the original columns. The input ALT column may be either VARCHAR or VARCHAR[]. The result appends pos_normed, end_pos_normed, ref_normed, alt_normed, normed, and norm_status; with split_multiallelic := TRUE, multiallelic sites are split before normalization and alt_normed becomes VARCHAR plus alt_index.",
+      "examples": [
+        "SELECT * FROM duckhts_bcftools_norm('variants', 'ref.fa');",
+        "SELECT * FROM duckhts_bcftools_norm('(SELECT CHROM AS chrom, POS AS pos, REF AS ref, ALT AS alt FROM read_bcf(''cohort.vcf.gz'')) AS v', 'ref.fa', split_multiallelic := TRUE);"
       ]
     },
     {

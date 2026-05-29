@@ -8,6 +8,7 @@ expect_true(requireNamespace("Rduckhts", quietly = TRUE))
 expect_true(exists("rduckhts_load"))
 expect_true(exists("rduckhts_bcf"))
 expect_true(exists("rduckhts_bam"))
+expect_true(exists("rduckhts_pileup"))
 expect_true(exists("rduckhts_bam_index"))
 expect_true(exists("rduckhts_bcf_index"))
 expect_true(exists("rduckhts_bgzip"))
@@ -39,13 +40,17 @@ expect_identical(
 expect_identical(
   names(formals(rduckhts_bcf)),
   c("con", "table_name", "path", "region", "index_path", "tidy_format",
-    "additional_csq_column_types", "overwrite")
+    "additional_csq_column_types", "decompression_threads", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_bam)),
   c("con", "table_name", "path", "region", "index_path", "reference",
     "standard_tags", "auxiliary_tags", "sequence_encoding",
-    "quality_representation", "decompression_threads", "overwrite")
+    "quality_representation", "cigar_representation", "decompression_threads", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_pileup)),
+  c("con", "table_name", "path", "region", "index_path", "min_mapq", "flag_mask", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_bam_index)),
@@ -88,7 +93,7 @@ expect_identical(
 expect_identical(
   names(formals(rduckhts_fasta)),
   c("con", "table_name", "path", "region", "index_path",
-    "sequence_encoding", "overwrite")
+    "gzi_path", "sequence_encoding", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_fasta_index)),
@@ -239,6 +244,8 @@ expect_true("duckhts_cgranges_count_overlaps" %in% catalog$name)
 expect_true("duckhts_cgranges_overlaps" %in% catalog$name)
 expect_true("bcftools_liftover" %in% catalog$name)
 expect_true("duckdb_liftover" %in% catalog$name)
+expect_true("bcftools_norm_row" %in% catalog$name)
+expect_true("duckhts_bcftools_norm" %in% catalog$name)
 expect_equal(unique(rduckhts_functions(kind = "scalar")$kind), "scalar")
 expect_equal(unique(rduckhts_functions(category = "Readers")$category), "Readers")
 expect_equal(unique(rduckhts_functions(category = "CIGAR Utils")$category), "CIGAR Utils")
@@ -281,12 +288,12 @@ expect_identical(
   names(formals(rduckhts_bam_multi)),
   c("con", "table_name", "files", "region", "index_path", "reference",
     "standard_tags", "auxiliary_tags", "sequence_encoding",
-    "quality_representation", "decompression_threads", ".params", "overwrite")
+    "quality_representation", "cigar_representation", "decompression_threads", ".params", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_bcf_multi)),
   c("con", "table_name", "files", "region", "index_path", "tidy_format",
-    "additional_csq_column_types", ".params", "overwrite")
+    "additional_csq_column_types", "decompression_threads", ".params", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_fastq_multi)),
@@ -297,7 +304,7 @@ expect_identical(
 expect_identical(
   names(formals(rduckhts_fasta_multi)),
   c("con", "table_name", "files", "region", "index_path",
-    "sequence_encoding", ".params", "overwrite")
+    "gzi_path", "sequence_encoding", ".params", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_bed_multi)),

@@ -268,6 +268,124 @@ rduckhts_functions <- function(category = NULL, kind = NULL) {
   catalog
 }
 
+.simd_backend_arg <- function(backend) {
+  if (!is.character(backend) || length(backend) != 1L || is.na(backend)) {
+    stop("backend must be a single non-missing character string", call. = FALSE)
+  }
+  backend
+}
+
+#' DuckHTS SIMD backend diagnostics
+#'
+#' Inspect or explicitly select the SIMD dispatch policy used by bundled
+#' DuckHTS byte-oriented helper kernels such as \code{seq_gc_content(...)}.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded via \code{rduckhts_load()}.
+#' @param backend A single backend request. \code{"auto"} selects the best
+#'   available implementation independently for each logical kernel at runtime
+#'   for \code{rduckhts_simd_set_backend()}. Backend inventory predicates such
+#'   as \code{rduckhts_simd_backend_available()} refer to concrete backends such
+#'   as \code{"scalar"}, \code{"sse2"}, \code{"sse41"}, \code{"avx2"},
+#'   \code{"avx512"}, \code{"neon"}, and \code{"wasm_simd128"}.
+#'
+#' @return \code{rduckhts_simd_backend()},
+#'   \code{rduckhts_simd_requested_backend()}, and
+#'   \code{rduckhts_simd_set_backend()} return a character scalar.
+#'   \code{rduckhts_simd_backend_compiled()},
+#'   \code{rduckhts_simd_backend_cpu_supported()}, and
+#'   \code{rduckhts_simd_backend_available()} return logical scalars.
+#'   \code{rduckhts_simd_info()} returns the extension-owned backend inventory
+#'   table with one row per known backend; availability means compiled and
+#'   CPU/runtime supported; SQL-level backend changes are process-wide and use
+#'   the one-row \code{duckhts_simd_set_backend(...)} table function; the
+#'   \code{selectable} column reports whether the backend has a selectable
+#'   implementation path.
+#'   Explicit selection still
+#'   requires \code{available = TRUE}. \code{rduckhts_simd_kernel_info()}
+#'   returns one row per logical SIMD kernel and is the authoritative diagnostic
+#'   for mixed per-kernel auto-dispatch.
+#'
+#' @examples
+#' \dontrun{
+#' con <- DBI::dbConnect(duckdb::duckdb(config = list(allow_unsigned_extensions = "true")))
+#' rduckhts_load(con)
+#' rduckhts_simd_info(con)
+#' rduckhts_simd_kernel_info(con)
+#' rduckhts_simd_backend_available(con, "scalar")
+#' rduckhts_simd_set_backend(con, "scalar")
+#' rduckhts_simd_set_backend(con, "auto")
+#' DBI::dbDisconnect(con, shutdown = TRUE)
+#' }
+#'
+#' @export
+rduckhts_simd_backend <- function(con) {
+  out <- DBI::dbGetQuery(con, "SELECT duckhts_simd_backend() AS backend")
+  out$backend[[1]]
+}
+
+#' @rdname rduckhts_simd_backend
+#' @export
+rduckhts_simd_requested_backend <- function(con) {
+  out <- DBI::dbGetQuery(con, "SELECT duckhts_simd_requested_backend() AS backend")
+  out$backend[[1]]
+}
+
+#' @rdname rduckhts_simd_backend
+#' @export
+rduckhts_simd_backend_compiled <- function(con, backend) {
+  backend <- .simd_backend_arg(backend)
+  out <- DBI::dbGetQuery(
+    con,
+    sprintf("SELECT duckhts_simd_backend_compiled(%s) AS compiled", sql_quote_string(backend))
+  )
+  isTRUE(out$compiled[[1]])
+}
+
+#' @rdname rduckhts_simd_backend
+#' @export
+rduckhts_simd_backend_cpu_supported <- function(con, backend) {
+  backend <- .simd_backend_arg(backend)
+  out <- DBI::dbGetQuery(
+    con,
+    sprintf("SELECT duckhts_simd_backend_cpu_supported(%s) AS supported", sql_quote_string(backend))
+  )
+  isTRUE(out$supported[[1]])
+}
+
+#' @rdname rduckhts_simd_backend
+#' @export
+rduckhts_simd_backend_available <- function(con, backend) {
+  backend <- .simd_backend_arg(backend)
+  out <- DBI::dbGetQuery(
+    con,
+    sprintf("SELECT duckhts_simd_backend_available(%s) AS available", sql_quote_string(backend))
+  )
+  isTRUE(out$available[[1]])
+}
+
+#' @rdname rduckhts_simd_backend
+#' @export
+rduckhts_simd_info <- function(con) {
+  DBI::dbGetQuery(con, "SELECT * FROM duckhts_simd_info()")
+}
+
+#' @rdname rduckhts_simd_backend
+#' @export
+rduckhts_simd_kernel_info <- function(con) {
+  DBI::dbGetQuery(con, "SELECT * FROM duckhts_simd_kernel_info()")
+}
+
+#' @rdname rduckhts_simd_backend
+#' @export
+rduckhts_simd_set_backend <- function(con, backend = "auto") {
+  backend <- .simd_backend_arg(backend)
+  out <- DBI::dbGetQuery(
+    con,
+    sprintf("SELECT backend FROM duckhts_simd_set_backend(%s)", sql_quote_string(backend))
+  )
+  out$backend[[1]]
+}
+
 #' DuckDB to R Type Mappings
 #'
 #' Returns a named list mapping between DuckDB and R data types.
@@ -569,6 +687,9 @@ duckhts_extension_dir <- function() {
 #' @param tidy_format Logical. If TRUE, FORMAT columns are returned in tidy format
 #' @param additional_csq_column_types Optional bcftools-style `PATTERN TYPE`
 #'   overrides for CSQ/ANN/BCSQ subfield typing, separated by newlines or `;`
+#' @param decompression_threads Integer. Number of htslib decompression worker
+#'   threads per file handle. Default `0`. Use `0` to keep BCF/VCF reads
+#'   single-threaded.
 #' @param overwrite Logical. If TRUE, overwrites existing table
 #'
 #' @return Invisible TRUE on success
@@ -593,6 +714,7 @@ rduckhts_bcf <- function(
   index_path = NULL,
   tidy_format = FALSE,
   additional_csq_column_types = NULL,
+  decompression_threads = 0,
   overwrite = FALSE
 ) {
   if (!missing(table_name) && !is.null(table_name)) {
@@ -621,6 +743,15 @@ rduckhts_bcf <- function(
   }
   if (!is.null(additional_csq_column_types)) {
     params$additional_csq_column_types <- sprintf("'%s'", additional_csq_column_types)
+  }
+  if (!is.null(decompression_threads)) {
+    params$decompression_threads <- sprintf(
+      "%d",
+      .validate_nonnegative_integer_param(
+        decompression_threads,
+        "decompression_threads"
+      )
+    )
   }
 
   param_str <- build_param_str(params)
@@ -662,6 +793,10 @@ rduckhts_bcf <- function(
 #' @param quality_representation Character. Quality representation for the QUAL column:
 #'   \code{"string"} (default) returns canonical Phred+33 text;
 #'   \code{"phred"} returns raw Phred values as \code{UTINYINT[]}.
+#' @param cigar_representation Character. CIGAR representation for the CIGAR column:
+#'   \code{"string"} (default) returns SAM text such as \code{"36M"};
+#'   \code{"binary"} returns packed BAM operations as \code{UINTEGER[]} where each
+#'   element is \code{(len << 4) | op}.
 #' @param decompression_threads Integer. Number of htslib decompression worker
 #'   threads per file handle. Default \code{2}. Use \code{0} to disable worker
 #'   threads.
@@ -692,6 +827,7 @@ rduckhts_bam <- function(
   auxiliary_tags = FALSE,
   sequence_encoding = NULL,
   quality_representation = NULL,
+  cigar_representation = NULL,
   decompression_threads = 2,
   overwrite = FALSE
 ) {
@@ -730,6 +866,9 @@ rduckhts_bam <- function(
   if (!is.null(quality_representation)) {
     params$quality_representation <- sprintf("'%s'", quality_representation)
   }
+  if (!is.null(cigar_representation)) {
+    params$cigar_representation <- sprintf("'%s'", cigar_representation)
+  }
   if (!is.null(decompression_threads)) {
     params$decompression_threads <- sprintf(
       "%d",
@@ -752,6 +891,91 @@ rduckhts_bam <- function(
   } else {
     create_query <- sprintf(
       "CREATE VIEW bam_data AS SELECT * FROM read_bam('%s'%s)",
+      path,
+      param_str
+    )
+  }
+
+  DBI::dbExecute(con, create_query)
+  invisible(TRUE)
+}
+
+#' Create BAM Pileup Table
+#'
+#' Creates a DuckDB table from a region-scoped BAM pileup using the DuckHTS
+#' extension. This is a compact base/quality pileup view backed by htslib's
+#' pileup engine; it is not samtools mpileup text parity.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded
+#' @param table_name Name for the created table
+#' @param path Path to the BAM file
+#' @param region Required genomic region (e.g., "chr1:1000-2000")
+#' @param index_path Optional explicit path to the BAM index (.bai/.csi)
+#' @param min_mapq Minimum mapping quality to include in the pileup
+#' @param flag_mask Bitmask of SAM flags to exclude before pileup construction.
+#'   The default \code{1796} matches samtools depth-style filtering of
+#'   unmapped, secondary, QC-fail, and duplicate reads.
+#' @param overwrite Logical. If TRUE, overwrites existing table
+#'
+#' @return Invisible TRUE on success
+#'
+#' @export
+rduckhts_pileup <- function(
+  con,
+  table_name,
+  path,
+  region,
+  index_path = NULL,
+  min_mapq = 0,
+  flag_mask = 1796,
+  overwrite = FALSE
+) {
+  if (!missing(table_name) && !is.null(table_name)) {
+    if (DBI::dbExistsTable(con, table_name) && !overwrite) {
+      stop(
+        "Table '",
+        table_name,
+        "' already exists. Use overwrite = TRUE to replace it."
+      )
+    }
+    if (DBI::dbExistsTable(con, table_name)) {
+      DBI::dbRemoveTable(con, table_name)
+    }
+  }
+
+  if (is.null(region) || length(region) != 1L || is.na(region) || !nzchar(region)) {
+    stop("region must be a single non-empty string", call. = FALSE)
+  }
+
+  params <- list(region = sprintf("'%s'", region))
+  if (!is.null(index_path)) {
+    params$index_path <- sprintf("'%s'", index_path)
+  }
+  if (!is.null(min_mapq)) {
+    params$min_mapq <- sprintf(
+      "%d",
+      .validate_nonnegative_integer_param(min_mapq, "min_mapq")
+    )
+  }
+  if (!is.null(flag_mask)) {
+    flag_mask <- .validate_nonnegative_integer_param(flag_mask, "flag_mask")
+    if (flag_mask > 65535L) {
+      stop("flag_mask must be between 0 and 65535", call. = FALSE)
+    }
+    params$flag_mask <- sprintf("%d", flag_mask)
+  }
+  param_str <- build_param_str(params)
+
+  if (!is.null(table_name)) {
+    create_query <- sprintf(
+      "CREATE TABLE %s AS SELECT * FROM read_pileup('%s'%s)",
+      table_name,
+      path,
+      param_str
+    )
+  } else {
+    create_query <- sprintf(
+      "CREATE VIEW pileup_data AS SELECT * FROM read_pileup('%s'%s)",
       path,
       param_str
     )
@@ -830,6 +1054,8 @@ normalize_tabix_types <- function(types) {
 #' @param path Path to the FASTA file
 #' @param region Optional genomic region (e.g., "chr1:1000-2000" or "chr1:1-10,chr2:5-20")
 #' @param index_path Optional explicit path to FASTA index file (.fai)
+#' @param gzi_path Optional explicit BGZF FASTA block index path (.gzi) for
+#'   bgzipped FASTA inputs when the sidecar is not colocated with the FASTA.
 #' @param sequence_encoding Character. Sequence encoding for the SEQUENCE column:
 #'   \code{"string"} (default) returns decoded bases as \code{VARCHAR};
 #'   \code{"nt16"} returns raw htslib nt16 4-bit codes as \code{UTINYINT[]}.
@@ -844,6 +1070,7 @@ rduckhts_fasta <- function(
   path,
   region = NULL,
   index_path = NULL,
+  gzi_path = NULL,
   sequence_encoding = NULL,
   overwrite = FALSE
 ) {
@@ -866,6 +1093,9 @@ rduckhts_fasta <- function(
   }
   if (!is.null(index_path)) {
     params$index_path <- sprintf("'%s'", index_path)
+  }
+  if (!is.null(gzi_path)) {
+    params$gzi_path <- sprintf("'%s'", gzi_path)
   }
   if (!is.null(sequence_encoding)) {
     params$sequence_encoding <- sprintf("'%s'", sequence_encoding)
@@ -965,6 +1195,8 @@ rduckhts_bed <- function(
 #' @param bin_width Optional fixed bin width in base pairs
 #' @param region Optional FASTA region filter
 #' @param index_path Optional explicit FASTA index path
+#' @param gzi_path Optional explicit BGZF FASTA block index path (.gzi) for
+#'   bgzipped FASTA inputs when the sidecar is not colocated with the FASTA.
 #' @param bed_index_path Optional explicit BED tabix index path
 #' @param include_seq Include the fetched interval sequence
 #'
@@ -978,6 +1210,7 @@ rduckhts_fasta_nuc <- function(
   bin_width = NULL,
   region = NULL,
   index_path = NULL,
+  gzi_path = NULL,
   bed_index_path = NULL,
   include_seq = FALSE
 ) {
@@ -986,6 +1219,7 @@ rduckhts_fasta_nuc <- function(
   if (!is.null(bin_width)) params$bin_width <- bin_width
   if (!is.null(region)) params$region <- sprintf("'%s'", region)
   if (!is.null(index_path)) params$index_path <- sprintf("'%s'", index_path)
+  if (!is.null(gzi_path)) params$gzi_path <- sprintf("'%s'", gzi_path)
   if (!is.null(bed_index_path)) params$bed_index_path <- sprintf("'%s'", bed_index_path)
   if (include_seq) params$include_seq <- "true"
   param_str <- build_param_str(params)
@@ -1044,7 +1278,7 @@ rduckhts_bgzip <- function(
 ) {
   params <- list(threads = threads, level = level)
   if (!is.null(output_path)) params$output_path <- sprintf("'%s'", output_path)
-  if (keep) params$keep <- "true"
+  params$keep <- if (keep) "true" else "false"
   if (overwrite) params$overwrite <- "true"
   param_str <- build_param_str(params)
   query <- sprintf("SELECT * FROM bgzip('%s'%s)", path, param_str)
@@ -1075,7 +1309,7 @@ rduckhts_bgunzip <- function(
 ) {
   params <- list(threads = threads)
   if (!is.null(output_path)) params$output_path <- sprintf("'%s'", output_path)
-  if (keep) params$keep <- "true"
+  params$keep <- if (keep) "true" else "false"
   if (overwrite) params$overwrite <- "true"
   param_str <- build_param_str(params)
   query <- sprintf("SELECT * FROM bgunzip('%s'%s)", path, param_str)
@@ -2069,6 +2303,75 @@ rduckhts_liftover <- function(
   DBI::dbGetQuery(con, sql)
 }
 
+#' Normalize Variant Alleles with bcftools-style Semantics
+#'
+#' Applies the DuckHTS `duckhts_bcftools_norm(...)` table macro to rows from a
+#' SQL query or table expression. Input rows must expose chromosome, 1-based
+#' position, reference allele, and alternate allele columns. Alternate alleles
+#' may be supplied either as a comma-delimited `VARCHAR` or as a `VARCHAR[]`
+#' list, matching the common DuckDB representations used by plain tables and
+#' `read_bcf(...)`.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded
+#' @param query SQL query or table expression to normalize
+#' @param fasta_ref Path to the reference FASTA
+#' @param chrom_col Source chromosome column name
+#' @param pos_col Source 1-based position column name
+#' @param ref_col Source reference allele column name
+#' @param alt_col Source alternate allele column name (`VARCHAR` or `VARCHAR[]`)
+#' @param split_multiallelic If `TRUE`, split multiallelic sites before
+#'   normalization so `alt_normed` is emitted as `VARCHAR` plus `alt_index`.
+#'   If `FALSE` (default), keep sites intact and emit `alt_normed` as
+#'   `VARCHAR[]`.
+#' @param end_pos_col Optional source column name containing an END-like
+#'   1-based end coordinate for symbolic deletions.
+#' @param svlen_col Optional source column name containing an SVLEN-like signed
+#'   length for symbolic duplications.
+#' @param fasta_index_path Optional explicit `.fai` sidecar path.
+#' @param gzi_path Optional explicit `.gzi` sidecar path for bgzipped FASTA.
+#'
+#' @return A data frame with the original columns plus `pos_normed`,
+#'   `end_pos_normed`, `ref_normed`, `alt_normed`, `normed`, and
+#'   `norm_status`. In split mode the result additionally includes `alt_index`.
+#'
+#' @export
+rduckhts_bcftools_norm <- function(
+  con,
+  query,
+  fasta_ref,
+  chrom_col = "chrom",
+  pos_col = "pos",
+  ref_col = "ref",
+  alt_col = "alt",
+  split_multiallelic = FALSE,
+  end_pos_col = NULL,
+  svlen_col = NULL,
+  fasta_index_path = NULL,
+  gzi_path = NULL
+) {
+  table_expr <- query
+  if (grepl("^\\s*select\\b", table_expr, ignore.case = TRUE)) {
+    table_expr <- sprintf("(%s) AS duckhts_src", table_expr)
+  }
+
+  params <- list(
+    sql_quote_string(table_expr),
+    sql_quote_string(fasta_ref)
+  )
+  if (!identical(chrom_col, "chrom")) params <- c(params, sprintf("chrom_col := '%s'", chrom_col))
+  if (!identical(pos_col, "pos")) params <- c(params, sprintf("pos_col := '%s'", pos_col))
+  if (!identical(ref_col, "ref")) params <- c(params, sprintf("ref_col := '%s'", ref_col))
+  if (!identical(alt_col, "alt")) params <- c(params, sprintf("alt_col := '%s'", alt_col))
+  params <- c(params, sprintf("split_multiallelic := %s", tolower(as.character(split_multiallelic))))
+  if (!is.null(end_pos_col)) params <- c(params, sprintf("end_pos_col := '%s'", end_pos_col))
+  if (!is.null(svlen_col)) params <- c(params, sprintf("svlen_col := '%s'", svlen_col))
+  if (!is.null(fasta_index_path)) params <- c(params, sprintf("fasta_index_path := '%s'", fasta_index_path))
+  if (!is.null(gzi_path)) params <- c(params, sprintf("gzi_path := '%s'", gzi_path))
+
+  sql <- sprintf("SELECT * FROM duckhts_bcftools_norm(%s)", paste(params, collapse = ", "))
+  DBI::dbGetQuery(con, sql)
+}
+
 #' Munge Summary Statistics Rows
 #'
 #' Applies the DuckHTS `duckdb_munge(...)` table macro to rows from a SQL query or
@@ -2430,8 +2733,10 @@ rduckhts_score <- function(
 #' @param reference Optional reference FASTA path (for CRAM).
 #' @param standard_tags Logical; include standard SAM tag columns.
 #' @param auxiliary_tags Logical; include auxiliary tag map column.
-#' @param sequence_encoding Optional sequence encoding (e.g. \code{"twoBit"}).
+#' @param sequence_encoding Optional sequence encoding (e.g. \code{"nt16"}).
 #' @param quality_representation Optional quality representation.
+#' @param cigar_representation Optional CIGAR representation; use
+#'   \code{"binary"} for packed BAM operations.
 #' @param decompression_threads Integer. Number of htslib decompression worker
 #'   threads per file handle. Default \code{2}. Use \code{0} to disable worker
 #'   threads.
@@ -2446,6 +2751,7 @@ rduckhts_bam_multi <- function(con, table_name, files, region = NULL,
                                standard_tags = FALSE, auxiliary_tags = FALSE,
                                sequence_encoding = NULL,
                                quality_representation = NULL,
+                               cigar_representation = NULL,
                                decompression_threads = 2,
                                .params = NULL, overwrite = FALSE) {
   params <- list()
@@ -2456,6 +2762,7 @@ rduckhts_bam_multi <- function(con, table_name, files, region = NULL,
   params$auxiliary_tags <- auxiliary_tags
   if (!is.null(sequence_encoding)) params$sequence_encoding <- sequence_encoding
   if (!is.null(quality_representation)) params$quality_representation <- quality_representation
+  if (!is.null(cigar_representation)) params$cigar_representation <- cigar_representation
   if (!is.null(decompression_threads)) params$decompression_threads <- decompression_threads
   .hts_multi_read(con, table_name, "read_bam", files, params, .params, overwrite)
 }
@@ -2473,6 +2780,8 @@ rduckhts_bam_multi <- function(con, table_name, files, region = NULL,
 #' @param index_path Optional index file path.
 #' @param tidy_format Logical; use tidy FORMAT column output.
 #' @param additional_csq_column_types Optional CSQ type override string.
+#' @param decompression_threads Integer. Number of htslib decompression worker
+#'   threads per file handle. Default `0`.
 #' @param .params Optional data.frame with per-file parameter overrides.
 #' @param overwrite Logical; if \code{TRUE}, replace an existing table.
 #' @return Invisible \code{TRUE} on success.
@@ -2480,6 +2789,7 @@ rduckhts_bam_multi <- function(con, table_name, files, region = NULL,
 rduckhts_bcf_multi <- function(con, table_name, files, region = NULL,
                                index_path = NULL, tidy_format = FALSE,
                                additional_csq_column_types = NULL,
+                               decompression_threads = 0,
                                .params = NULL, overwrite = FALSE) {
   params <- list()
   if (!is.null(region)) params$region <- region
@@ -2487,6 +2797,12 @@ rduckhts_bcf_multi <- function(con, table_name, files, region = NULL,
   if (isTRUE(tidy_format)) params$tidy_format <- TRUE
   if (!is.null(additional_csq_column_types)) {
     params$additional_csq_column_types <- additional_csq_column_types
+  }
+  if (!is.null(decompression_threads)) {
+    params$decompression_threads <- .validate_nonnegative_integer_param(
+      decompression_threads,
+      "decompression_threads"
+    )
   }
   .hts_multi_read(con, table_name, "read_bcf", files, params, .params, overwrite)
 }
@@ -2534,17 +2850,20 @@ rduckhts_fastq_multi <- function(con, table_name, files, mate_path = NULL,
 #' @param files Character vector of file paths or glob patterns.
 #' @param region Optional region string.
 #' @param index_path Optional index file path.
+#' @param gzi_path Optional explicit BGZF FASTA block index path (.gzi).
 #' @param sequence_encoding Optional sequence encoding.
 #' @param .params Optional data.frame with per-file parameter overrides.
 #' @param overwrite Logical; if \code{TRUE}, replace an existing table.
 #' @return Invisible \code{TRUE} on success.
 #' @export
 rduckhts_fasta_multi <- function(con, table_name, files, region = NULL,
-                                 index_path = NULL, sequence_encoding = NULL,
+                                 index_path = NULL, gzi_path = NULL,
+                                 sequence_encoding = NULL,
                                  .params = NULL, overwrite = FALSE) {
   params <- list()
   if (!is.null(region)) params$region <- region
   if (!is.null(index_path)) params$index_path <- index_path
+  if (!is.null(gzi_path)) params$gzi_path <- gzi_path
   if (!is.null(sequence_encoding)) params$sequence_encoding <- sequence_encoding
   .hts_multi_read(con, table_name, "read_fasta", files, params, .params, overwrite)
 }
