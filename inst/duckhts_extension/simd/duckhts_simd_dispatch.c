@@ -278,6 +278,56 @@ void duckhts_simd_builder_consider_base_counts(duckhts_simd_builder_t *builder,
     builder->best_priority[kernel] = priority;
 }
 
+void duckhts_simd_builder_consider_bam_nt16_counts(duckhts_simd_builder_t *builder,
+                                                   duckhts_simd_cap_t cap,
+                                                   const char *backend,
+                                                   int priority,
+                                                   duckhts_bam_nt16_counts_fn fn) {
+    duckhts_simd_dispatch_table_t *table;
+    duckhts_simd_kernel_slot_t *slot;
+    int kernel = DUCKHTS_KERNEL_BAM_NT16_COUNTS;
+
+    if (!builder || !builder->table || !fn) return;
+    table = builder->table;
+    if ((table->viable_caps & cap) == 0) return;
+    if (priority >= builder->best_priority[kernel]) return;
+
+    table->bam_nt16_counts = fn;
+    slot = &table->slots[kernel];
+    slot->kernel = duckhts_simd_kernel_name((duckhts_kernel_kind_t)kernel);
+    slot->backend = backend;
+    slot->cap = cap;
+    slot->priority = priority;
+    slot->scalar_fallback = (cap == DUCKHTS_SIMD_CAP_SCALAR &&
+                             (table->viable_caps & ~DUCKHTS_SIMD_CAP_SCALAR) != 0);
+    builder->best_priority[kernel] = priority;
+}
+
+void duckhts_simd_builder_consider_nt16_gc_counts(duckhts_simd_builder_t *builder,
+                                                  duckhts_simd_cap_t cap,
+                                                  const char *backend,
+                                                  int priority,
+                                                  duckhts_nt16_gc_counts_fn fn) {
+    duckhts_simd_dispatch_table_t *table;
+    duckhts_simd_kernel_slot_t *slot;
+    int kernel = DUCKHTS_KERNEL_NT16_GC_COUNTS;
+
+    if (!builder || !builder->table || !fn) return;
+    table = builder->table;
+    if ((table->viable_caps & cap) == 0) return;
+    if (priority >= builder->best_priority[kernel]) return;
+
+    table->nt16_gc_counts = fn;
+    slot = &table->slots[kernel];
+    slot->kernel = duckhts_simd_kernel_name((duckhts_kernel_kind_t)kernel);
+    slot->backend = backend;
+    slot->cap = cap;
+    slot->priority = priority;
+    slot->scalar_fallback = (cap == DUCKHTS_SIMD_CAP_SCALAR &&
+                             (table->viable_caps & ~DUCKHTS_SIMD_CAP_SCALAR) != 0);
+    builder->best_priority[kernel] = priority;
+}
+
 static const char *duckhts_simd_selected_label(const duckhts_simd_dispatch_table_t *table) {
     const char *label = (const char *)0;
 
@@ -311,12 +361,20 @@ static int duckhts_simd_table_resolved(const duckhts_simd_dispatch_table_t *tabl
     return 1;
 }
 
-static void duckhts_simd_require_table_resolved(const duckhts_simd_dispatch_table_t *table) {
-    if (duckhts_simd_table_resolved(table)) return;
+static void duckhts_simd_require_table_resolved(duckhts_simd_dispatch_table_t *table) {
+    const char *requested = table && table->requested_backend ? table->requested_backend : "unknown";
+    duckhts_simd_builder_t builder;
+    if (!table || duckhts_simd_table_resolved(table)) return;
+
     fprintf(stderr,
-            "duckhts SIMD dispatch table for request '%s' is missing a scalar fallback for at least one logical kernel\n",
-            table && table->requested_backend ? table->requested_backend : "unknown");
-    abort();
+            "duckhts SIMD dispatch table for request '%s' is missing entries; falling back to scalar backend\n",
+            requested);
+
+    // Defensive fallback: rebuild the whole table from scalar registrations so
+    // future kernels cannot retain NULL function pointers after a partial miss.
+    duckhts_simd_builder_init(&builder, table, requested, DUCKHTS_SIMD_CAP_SCALAR);
+    duckhts_simd_scalar_register(&builder);
+    table->selected_backend = "scalar";
 }
 
 static void duckhts_simd_build_table(duckhts_simd_dispatch_table_t *table,
@@ -461,6 +519,26 @@ void duckhts_simd_base_counts_with_table(const duckhts_simd_dispatch_table_t *ta
 void duckhts_simd_base_counts(const char *seq, size_t len,
                               duckhts_simd_base_counts_t *out) {
     duckhts_simd_base_counts_with_table(duckhts_simd_dispatch_snapshot(), seq, len, out);
+}
+
+void duckhts_simd_bam_nt16_counts_with_table(const duckhts_simd_dispatch_table_t *table,
+                                             const uint8_t *packed_seq,
+                                             int32_t n_bases,
+                                             duckhts_simd_bam_nt16_counts_t *out) {
+    if (!table) table = duckhts_simd_current();
+    table->bam_nt16_counts(packed_seq, n_bases, out);
+}
+
+void duckhts_simd_bam_nt16_counts(const uint8_t *packed_seq, int32_t n_bases,
+                                  duckhts_simd_bam_nt16_counts_t *out) {
+    duckhts_simd_bam_nt16_counts_with_table(duckhts_simd_dispatch_snapshot(), packed_seq, n_bases, out);
+}
+
+void duckhts_simd_nt16_gc_counts_with_table(const duckhts_simd_dispatch_table_t *table,
+                                            const uint8_t *codes, size_t n,
+                                            duckhts_simd_base_counts_t *out) {
+    if (!table) table = duckhts_simd_current();
+    table->nt16_gc_counts(codes, n, out);
 }
 
 static inline void set_null_at(duckdb_vector vector, idx_t row) {

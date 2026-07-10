@@ -37,6 +37,7 @@
         "The extension also includes sequence utility UDFs, SAM flag predicate helpers, and HTS metadata helpers."
       ],
       "feature_notes": [
+        "Reader table functions accept scan_mode := 'sequential' to force full-file streaming/counting instead of index-backed count/parallel paths where applicable; region queries remain index-backed and are incompatible with sequential mode.",
         "Paired FASTQ is supported via `mate_path` or `interleaved := true`.",
         "CRAM reads are supported with an explicit reference file.",
         "GTF/GFF attributes can be returned as a parsed `MAP` with `attributes_map := true` via `read_gff` or `read_gtf`.",
@@ -151,27 +152,137 @@
       ]
     },
     {
+      "name": "duckhts_duckdb_type_supported",
+      "kind": "scalar_macro",
+      "category": "Diagnostics",
+      "signature": "duckhts_duckdb_type_supported(type_name)",
+      "returns": "BOOLEAN",
+      "r_wrapper": "",
+      "description": "Return whether the currently open DuckDB runtime advertises a logical type with the given name through duckdb_types(). This is a catalog-level runtime probe for feature gating SQL/macros across DuckDB versions.",
+      "examples": [
+        "SELECT duckhts_duckdb_type_supported('VARIANT');",
+        "SELECT duckhts_duckdb_type_supported('GEOMETRY');"
+      ]
+    },
+    {
+      "name": "duckhts_duckdb_supports_variant",
+      "kind": "scalar_macro",
+      "category": "Diagnostics",
+      "signature": "duckhts_duckdb_supports_variant()",
+      "returns": "BOOLEAN",
+      "r_wrapper": "",
+      "description": "Return whether the currently open DuckDB runtime advertises the VARIANT logical type. Use this to gate optional SQL that depends on DuckDB VARIANT support.",
+      "examples": [
+        "SELECT duckhts_duckdb_supports_variant();"
+      ]
+    },
+    {
+      "name": "duckhts_duckdb_supports_geometry",
+      "kind": "scalar_macro",
+      "category": "Diagnostics",
+      "signature": "duckhts_duckdb_supports_geometry()",
+      "returns": "BOOLEAN",
+      "r_wrapper": "",
+      "description": "Return whether the currently open DuckDB runtime advertises the GEOMETRY logical type. Use this to gate optional SQL that depends on DuckDB GEOMETRY support.",
+      "examples": [
+        "SELECT duckhts_duckdb_supports_geometry();"
+      ]
+    },
+    {
       "name": "read_bcf",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_bcf(path, region := NULL, index_path := NULL, tidy_format := FALSE, additional_csq_column_types := NULL, decompression_threads := 0)",
+      "signature": "read_bcf(path, region := NULL, index_path := NULL, tidy_format := FALSE, additional_csq_column_types := NULL, scan_mode := 'auto', decompression_threads := 0, decode_error_policy := 'null')",
       "returns": "table",
       "r_wrapper": "rduckhts_bcf",
-      "description": "Read VCF and BCF variant data with typed INFO, FORMAT, typed CSQ/ANN/BCSQ subfields, optional tidy sample output, optional bcftools-style CSQ type overrides, and optional htslib decompression worker threads via decompression_threads (default 0 for single-threaded reads).",
+      "description": "Read VCF and BCF variant data with typed INFO, FORMAT, typed CSQ/ANN/BCSQ subfields, optional tidy sample output, optional bcftools-style CSQ type overrides, explicit scan_mode control ('auto' or full-file 'sequential'), optional htslib decompression worker threads via decompression_threads (default 0 for single-threaded reads), and decode_error_policy ('null', 'warn', or 'error') for corrupt BCF header-vs-payload decode mismatches.",
       "examples": [
         "SELECT CHROM, POS, REF, ALT FROM read_bcf('vcf_file.bcf') LIMIT 5;"
+      ]
+    },
+    {
+      "name": "read_bcf_v2",
+      "kind": "table",
+      "category": "Readers",
+      "signature": "read_bcf_v2(path, region := NULL, index_path := NULL, tidy_format := FALSE, additional_csq_column_types := NULL, scan_mode := 'auto', decompression_threads := 0, decode_error_policy := 'null', samples := NULL, samples_file := NULL, exclude_samples := NULL, exclude_samples_file := NULL, force_samples := FALSE, include_info := TRUE, include_format := TRUE, include_vep := TRUE, info_fields := NULL, format_fields := NULL, vep_fields := NULL)",
+      "returns": "table",
+      "r_wrapper": "",
+      "description": "Experimental clone of read_bcf(...) for non-destructive benchmarking of current-schema scan optimizations. It preserves the read_bcf wide/tidy output schema by default, streams full-file scans by default instead of auto-iterating indexed contigs, accepts the same scan_mode and decode_error_policy ('null', 'warn', or 'error') contract as read_bcf, sets htslib VCF text max_unpack from DuckDB projection pushdown so unprojected INFO/FORMAT text can be skipped earlier, keeps INFO/FORMAT/GT decode buffers and parsed VEP/CSQ records in local scan state across output chunks, repeats VEP-derived values correctly across tidy sample rows, supports v2-only htslib sample pushdown via comma-separated samples/exclude_samples strings or samples_file/exclude_samples_file lists, can bind only requested INFO/FORMAT/VEP fields through include_info/include_format/include_vep and comma-separated info_fields/format_fields/vep_fields controls, rejects format_fields when no samples are selected, treats tidy_format := true with include_format := false as one row per variant because no SAMPLE_ID/FORMAT columns are bound, and counts VCF text rows without parsing when no columns are projected.",
+      "examples": [
+        "SELECT CHROM, POS, REF, ALT FROM read_bcf_v2('vcf_file.bcf') LIMIT 5;"
+      ]
+    },
+    {
+      "name": "read_bcf_appender",
+      "kind": "table",
+      "category": "Readers",
+      "signature": "read_bcf_appender(path, target_table, region := NULL, tidy_format := TRUE, overwrite := TRUE, include_file_offset := FALSE, region_threads := 1, decompression_threads := 0, decode_error_policy := 'null')",
+      "returns": "table",
+      "r_wrapper": "",
+      "description": "Experimental side-effecting benchmark helper that reads BCF/VCF with htslib and appends a narrow scalar tidy table through DuckDB's chunk appender API. The target table is created in the default schema with columns CHROM, POS, REF, ALT, SAMPLE_ID, and FORMAT_GT; set include_file_offset := TRUE to also add FILE_OFFSET. For comma-separated region queries, region_threads > 1 claims regions in parallel and adds duckhts_region_idx so callers can restore requested-region order with ORDER BY duckhts_region_idx, POS. The single-stream (region_threads = 1) path runs inside an internal transaction and surfaces malformed-record errors as DuckDB errors; decode_error_policy controls corrupt BCF FORMAT/GT header-vs-payload mismatches with 'null', 'warn', or 'error'. The parallel path shares one DuckDB connection across worker appenders and is best-effort benchmarking only, with no transactional rollback. target_table must be an unqualified SQL identifier. This is intended to compare appender-based materialization against read_bcf(...) query pipelines, not as a full replacement for the typed read_bcf surface.",
+      "examples": [
+        "SELECT * FROM read_bcf_appender('vcf_file.bcf', 'bcf_app', region := '1:1-1000000');",
+        "SELECT count(*) FROM bcf_app;"
       ]
     },
     {
       "name": "read_bam",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_bam(path, standard_tags := FALSE, auxiliary_tags := FALSE, region := NULL, index_path := NULL, reference := NULL, sequence_encoding := 'string', quality_representation := 'string', cigar_representation := 'string', decompression_threads := 2)",
+      "signature": "read_bam(path, standard_tags := FALSE, auxiliary_tags := FALSE, region := NULL, index_path := NULL, reference := NULL, sequence_encoding := 'string', quality_representation := 'string', cigar_representation := 'string', scan_mode := 'auto', decompression_threads := 2)",
       "returns": "table",
       "r_wrapper": "rduckhts_bam",
-      "description": "Read SAM, BAM, and CRAM alignments with optional typed SAMtags and auxiliary tag maps. Use sequence_encoding := 'nt16' to return SEQ as UTINYINT[], quality_representation := 'phred' to return QUAL as UTINYINT[], and cigar_representation := 'binary' to return packed BAM CIGAR operations as UINTEGER[] instead of SAM text. decompression_threads controls per-file htslib worker threads and defaults to 2; use 0 to disable worker threads.",
+      "description": "Read SAM, BAM, and CRAM alignments with optional typed SAMtags and auxiliary tag maps. Use sequence_encoding := 'nt16' to return SEQ as UTINYINT[], quality_representation := 'phred' to return QUAL as UTINYINT[], and cigar_representation := 'binary' to return packed BAM CIGAR operations as UINTEGER[] instead of SAM text. scan_mode := 'sequential' forces a full-file streaming scan instead of index-backed count/parallel paths and is incompatible with region. decompression_threads controls per-file htslib worker threads and defaults to 2; use 0 to disable worker threads.",
       "examples": [
         "SELECT QNAME, FLAG, RNAME, POS FROM read_bam('range.bam') LIMIT 5;"
+      ]
+    },
+    {
+      "name": "duckhts_bcf_convert_parquet_sql",
+      "kind": "scalar_macro",
+      "category": "Converters",
+      "signature": "duckhts_bcf_convert_parquet_sql(path, output, columns := []::VARCHAR[], region := NULL, index_path := NULL, tidy_format := FALSE, additional_csq_column_types := NULL, decompression_threads := 0, where_sql := NULL, compression := 'zstd', row_group_size := 100000, partition_by := []::VARCHAR[], include_metadata := TRUE, header_text := NULL, metadata := map([]::VARCHAR[], []::VARCHAR[]), metadata_json_file := NULL, overwrite := FALSE, write_format_version := '1')",
+      "returns": "VARCHAR",
+      "r_wrapper": "rduckhts_bcf_convert_parquet",
+      "description": "Build a DuckDB COPY statement that converts read_bcf(...) output to Parquet with DuckHTS key-value metadata, preserved or corrected VCF header text, user metadata from metadata := map(...), selected columns, filters, and partition columns. Optional metadata_json_file is caller-managed and requires DuckDB's json extension to be available when the builder is called; use metadata maps for CRAN/offline-safe workflows. Clients execute the returned SQL string; the R wrapper is a thin DBI helper that does this execution.",
+      "examples": [
+        "SELECT duckhts_bcf_convert_parquet_sql('cohort.vcf.gz', 'cohort.parquet', columns := ['CHROM','POS','REF','ALT'], metadata := map(['project'], ['cohort-a']));"
+      ]
+    },
+    {
+      "name": "duckhts_bam_convert_parquet_sql",
+      "kind": "scalar_macro",
+      "category": "Converters",
+      "signature": "duckhts_bam_convert_parquet_sql(path, output, columns := []::VARCHAR[], region := NULL, index_path := NULL, reference := NULL, standard_tags := FALSE, auxiliary_tags := FALSE, sequence_encoding := NULL, quality_representation := NULL, cigar_representation := NULL, decompression_threads := 2, where_sql := NULL, compression := 'zstd', row_group_size := 100000, partition_by := []::VARCHAR[], include_metadata := TRUE, header_text := NULL, metadata := map([]::VARCHAR[], []::VARCHAR[]), metadata_json_file := NULL, overwrite := FALSE, write_format_version := '1')",
+      "returns": "VARCHAR",
+      "r_wrapper": "rduckhts_bam_convert_parquet",
+      "description": "Build a DuckDB COPY statement that converts read_bam(...) output to Parquet with DuckHTS key-value metadata, preserved or corrected SAM header text, user metadata from metadata := map(...), selected columns, filters, and partition columns. Optional metadata_json_file is caller-managed and requires DuckDB's json extension to be available when the builder is called; use metadata maps for CRAN/offline-safe workflows. Clients execute the returned SQL string; the R wrapper is a thin DBI helper that does this execution.",
+      "examples": [
+        "SELECT duckhts_bam_convert_parquet_sql('sample.bam', 'sample.parquet', columns := ['QNAME','FLAG','RNAME','POS']);"
+      ]
+    },
+    {
+      "name": "duckhts_gff_convert_parquet_sql",
+      "kind": "scalar_macro",
+      "category": "Converters",
+      "signature": "duckhts_gff_convert_parquet_sql(path, output, columns := []::VARCHAR[], region := NULL, index_path := NULL, header := NULL, header_names := []::VARCHAR[], auto_detect := NULL, column_types := []::VARCHAR[], attributes_map := FALSE, attributes_list := FALSE, attributes_pairs := FALSE, strict := FALSE, where_sql := NULL, compression := 'zstd', row_group_size := 100000, partition_by := []::VARCHAR[], include_metadata := TRUE, header_text := NULL, metadata := map([]::VARCHAR[], []::VARCHAR[]), metadata_json_file := NULL, overwrite := FALSE, write_format_version := '1')",
+      "returns": "VARCHAR",
+      "r_wrapper": "rduckhts_gff_convert_parquet",
+      "description": "Build a DuckDB COPY statement that converts read_gff(...) output to Parquet with DuckHTS key-value metadata, preserved or corrected GFF/tabix header text, user metadata from metadata := map(...), selected columns, filters, and partition columns. Optional metadata_json_file is caller-managed and requires DuckDB's json extension to be available when the builder is called; use metadata maps for CRAN/offline-safe workflows. Clients execute the returned SQL string; the R wrapper is a thin DBI helper that does this execution.",
+      "examples": [
+        "SELECT duckhts_gff_convert_parquet_sql('annotations.gff3.gz', 'annotations/', columns := ['seqname','feature','start','end'], partition_by := ['feature']);"
+      ]
+    },
+    {
+      "name": "duckhts_tabix_convert_parquet_sql",
+      "kind": "scalar_macro",
+      "category": "Converters",
+      "signature": "duckhts_tabix_convert_parquet_sql(path, output, columns := []::VARCHAR[], region := NULL, index_path := NULL, header := NULL, header_names := []::VARCHAR[], auto_detect := NULL, column_types := []::VARCHAR[], where_sql := NULL, compression := 'zstd', row_group_size := 100000, partition_by := []::VARCHAR[], include_metadata := TRUE, header_text := NULL, metadata := map([]::VARCHAR[], []::VARCHAR[]), metadata_json_file := NULL, overwrite := FALSE, write_format_version := '1')",
+      "returns": "VARCHAR",
+      "r_wrapper": "rduckhts_tabix_convert_parquet",
+      "description": "Build a DuckDB COPY statement that converts read_tabix(...) output to Parquet with DuckHTS key-value metadata, preserved or corrected tabix header text, user metadata from metadata := map(...), selected columns, filters, and partition columns. Optional metadata_json_file is caller-managed and requires DuckDB's json extension to be available when the builder is called; use metadata maps for CRAN/offline-safe workflows. Clients execute the returned SQL string; the R wrapper is a thin DBI helper that does this execution.",
+      "examples": [
+        "SELECT duckhts_tabix_convert_parquet_sql('regions.tsv.gz', 'regions.parquet', header_names := ['chrom','pos','value'], auto_detect := TRUE);"
       ]
     },
     {
@@ -190,10 +301,10 @@
       "name": "read_fasta",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_fasta(path, region := NULL, index_path := NULL, gzi_path := NULL, sequence_encoding := 'string')",
+      "signature": "read_fasta(path, region := NULL, index_path := NULL, gzi_path := NULL, sequence_encoding := 'string', scan_mode := 'auto')",
       "returns": "table",
       "r_wrapper": "rduckhts_fasta",
-      "description": "Read FASTA records or indexed FASTA regions as sequence rows. Use sequence_encoding := 'nt16' to return SEQUENCE as UTINYINT[] (htslib nt16 4-bit codes) instead of VARCHAR. For bgzipped FASTA, gzi_path may point to an explicit .gzi sidecar when it is not colocated with the FASTA.",
+      "description": "Read FASTA records or indexed FASTA regions as sequence rows. Use sequence_encoding := 'nt16' to return SEQUENCE as UTINYINT[] (htslib nt16 4-bit codes) instead of VARCHAR. For bgzipped FASTA, gzi_path may point to an explicit .gzi sidecar when it is not colocated with the FASTA. scan_mode := 'sequential' forces full-file streaming/counting instead of index-backed count paths and is incompatible with region.",
       "examples": [
         "SELECT NAME, length(SEQUENCE) FROM read_fasta('ce.fa');"
       ]
@@ -202,10 +313,10 @@
       "name": "read_bed",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_bed(path, region := NULL, index_path := NULL)",
+      "signature": "read_bed(path, region := NULL, index_path := NULL, scan_mode := 'auto')",
       "returns": "table",
       "r_wrapper": "rduckhts_bed",
-      "description": "Read BED3-BED12 interval files with canonical typed columns and optional tabix-backed region filtering.",
+      "description": "Read BED3-BED12 interval files with canonical typed columns and optional tabix-backed region filtering. scan_mode := 'sequential' forces full-file streaming/counting instead of index-backed count paths and is incompatible with region.",
       "examples": [
         "SELECT chrom, start, \"end\", name FROM read_bed('targets.bed') LIMIT 5;"
       ]
@@ -358,10 +469,10 @@
       "name": "read_fastq",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_fastq(path, interleaved := FALSE, mate_path := NULL, sequence_encoding := 'string', quality_representation := 'string', input_quality_encoding := 'phred33')",
+      "signature": "read_fastq(path, interleaved := FALSE, mate_path := NULL, sequence_encoding := 'string', quality_representation := 'string', input_quality_encoding := 'phred33', scan_mode := 'auto')",
       "returns": "table",
       "r_wrapper": "rduckhts_fastq",
-      "description": "Read single-end, paired-end, or interleaved FASTQ files with optional legacy quality decoding. By default, FASTQ qualities are interpreted as modern Phred+33 input. Use sequence_encoding := 'nt16' to return SEQUENCE as UTINYINT[] and quality_representation := 'phred' to return QUALITY as UTINYINT[] instead of VARCHAR. input_quality_encoding accepts 'phred33', 'auto', 'phred64', or 'solexa64'.",
+      "description": "Read single-end, paired-end, or interleaved FASTQ files with optional legacy quality decoding. By default, FASTQ qualities are interpreted as modern Phred+33 input. Use sequence_encoding := 'nt16' to return SEQUENCE as UTINYINT[] and quality_representation := 'phred' to return QUALITY as UTINYINT[] instead of VARCHAR. input_quality_encoding accepts 'phred33', 'auto', 'phred64', or 'solexa64'. scan_mode := 'sequential' forces raw streaming/counting instead of index-backed count paths.",
       "examples": [
         "SELECT NAME, MATE FROM read_fastq('r1.fq', mate_path := 'r2.fq') LIMIT 5;"
       ]
@@ -382,10 +493,10 @@
       "name": "read_gff",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_gff(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, attributes_map := FALSE, attributes_list := FALSE, attributes_pairs := FALSE, strict := FALSE, region := NULL, index_path := NULL)",
+      "signature": "read_gff(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, attributes_map := FALSE, attributes_list := FALSE, attributes_pairs := FALSE, strict := FALSE, region := NULL, index_path := NULL, scan_mode := 'auto')",
       "returns": "table",
       "r_wrapper": "rduckhts_gff",
-      "description": "Read GFF annotations with optional raw scalar and richer list/pair parsed attribute columns, strict GFF3 structural validation, and indexed region filtering.",
+      "description": "Read GFF annotations with optional raw scalar and richer list/pair parsed attribute columns, strict GFF3 structural validation, and indexed region filtering. scan_mode := 'sequential' forces full-file streaming/counting instead of index-backed count paths and is incompatible with region.",
       "examples": [
         "SELECT seqname, feature, start, \"end\" FROM read_gff('gff_file.gff.gz') LIMIT 5;"
       ]
@@ -394,10 +505,10 @@
       "name": "read_gtf",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_gtf(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, attributes_map := FALSE, attributes_list := FALSE, attributes_pairs := FALSE, region := NULL, index_path := NULL)",
+      "signature": "read_gtf(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, attributes_map := FALSE, attributes_list := FALSE, attributes_pairs := FALSE, region := NULL, index_path := NULL, scan_mode := 'auto')",
       "returns": "table",
       "r_wrapper": "rduckhts_gtf",
-      "description": "Read GTF annotations with optional raw scalar and richer list/pair parsed attribute columns and indexed region filtering.",
+      "description": "Read GTF annotations with optional raw scalar and richer list/pair parsed attribute columns and indexed region filtering. scan_mode := 'sequential' forces full-file streaming/counting instead of index-backed count paths and is incompatible with region.",
       "examples": [
         "SELECT seqname, feature, start, \"end\" FROM read_gtf('annotations.gtf.gz') LIMIT 5;"
       ]
@@ -406,10 +517,10 @@
       "name": "read_tabix",
       "kind": "table",
       "category": "Readers",
-      "signature": "read_tabix(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, region := NULL, index_path := NULL)",
+      "signature": "read_tabix(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, region := NULL, index_path := NULL, scan_mode := 'auto')",
       "returns": "table",
       "r_wrapper": "rduckhts_tabix",
-      "description": "Read generic tabix-indexed text data with optional header handling and type inference.",
+      "description": "Read generic tabix-indexed text data with optional header handling and type inference. scan_mode := 'sequential' forces full-file streaming/counting instead of index-backed count paths and is incompatible with region.",
       "examples": [
         "SELECT * FROM read_tabix('meta_tabix.tsv.gz') LIMIT 5;"
       ]
@@ -541,7 +652,7 @@
       "signature": "read_hts_header(path, format := NULL, mode := NULL)",
       "returns": "table",
       "r_wrapper": "rduckhts_hts_header",
-      "description": "Inspect HTS headers in parsed, raw, or combined form across supported formats.",
+      "description": "Inspect HTS headers in parsed, raw, or combined form across supported formats. Raw VCF/BCF mode includes the final `#CHROM` sample header line so the returned text is suitable for Parquet metadata and future VCF/BCF regeneration.",
       "examples": [
         "SELECT record_type, id FROM read_hts_header('formatcols.vcf.gz') LIMIT 10;"
       ]
@@ -902,7 +1013,7 @@
       "signature": "bcftools_norm_row(chrom, pos, ref, alt, fasta_ref, end_pos := NULL, svlen := NULL, fasta_index_path := NULL, gzi_path := NULL)",
       "returns": "STRUCT",
       "r_wrapper": "",
-      "description": "Normalize one variant row with bcftools/vt-style left-alignment semantics against a FASTA reference. The alt argument may be either a comma-delimited VARCHAR or a VARCHAR[] list. The returned STRUCT contains pos_normed, end_pos_normed, ref_normed, alt_normed (always VARCHAR[]), normed (TRUE/FALSE/NULL), and norm_status. Symbolic <DEL> rows can use end_pos, and symbolic <DUP> rows can use svlen.",
+      "description": "Normalize one variant row with bcftools/vt-style left-alignment semantics against a FASTA reference. The alt argument may be either a comma-delimited VARCHAR or a VARCHAR[] list. The returned STRUCT contains pos_normed, end_pos_normed, ref_normed, alt_normed (always VARCHAR[]), normed (TRUE/FALSE/NULL), and norm_status. Symbolic <DEL> rows can use end_pos, and symbolic <DUP> rows can use svlen. gVCF <NON_REF>/<*> reference-block alleles pass through with GVCFReferenceBlock, and mixed real-plus-gVCF-symbolic alleles normalize the real alleles while preserving symbolic alleles and caller-supplied reference-block END in site-preserving output.",
       "examples": [
         "SELECT nr.pos_normed, nr.ref_normed, nr.alt_normed FROM (SELECT bcftools_norm_row('chr1', 100, 'AC', 'A', 'ref.fa', NULL::BIGINT, NULL::BIGINT, NULL, NULL) AS nr);"
       ]
@@ -914,7 +1025,7 @@
       "signature": "duckhts_bcftools_norm(table_name, fasta_ref, chrom_col := 'chrom', pos_col := 'pos', ref_col := 'ref', alt_col := 'alt', split_multiallelic := FALSE, end_pos_col := NULL, svlen_col := NULL, fasta_index_path := NULL, gzi_path := NULL)",
       "returns": "table",
       "r_wrapper": "rduckhts_bcftools_norm",
-      "description": "DuckDB table macro wrapper over bcftools_norm_row that normalizes variants from a table or derived-table expression while preserving the original columns. The input ALT column may be either VARCHAR or VARCHAR[]. The result appends pos_normed, end_pos_normed, ref_normed, alt_normed, normed, and norm_status; with split_multiallelic := TRUE, multiallelic sites are split before normalization and alt_normed becomes VARCHAR plus alt_index.",
+      "description": "DuckDB table macro wrapper over bcftools_norm_row that normalizes variants from a table or derived-table expression while preserving the original columns. The input ALT column may be either VARCHAR or VARCHAR[]. The result appends pos_normed, end_pos_normed, ref_normed, alt_normed, normed, and norm_status; with split_multiallelic := TRUE, multiallelic sites are split before normalization and alt_normed becomes VARCHAR plus alt_index. This is a vt/vcfnorm-style row/table transform, not a full-record VCF/BCF rewrite: genotype, PL/GP/DS, and PS fields are preserved as caller columns unless a separate full-record writer/remapper layer is used.",
       "examples": [
         "SELECT * FROM duckhts_bcftools_norm('variants', 'ref.fa');",
         "SELECT * FROM duckhts_bcftools_norm('(SELECT CHROM AS chrom, POS AS pos, REF AS ref, ALT AS alt FROM read_bcf(''cohort.vcf.gz'')) AS v', 'ref.fa', split_multiallelic := TRUE);"
@@ -986,15 +1097,29 @@
       ]
     },
     {
+      "name": "hts_region_union_query",
+      "kind": "scalar_macro",
+      "category": "Readers",
+      "signature": "hts_region_union_query(reader, path, regions, params := '')",
+      "returns": "VARCHAR",
+      "r_wrapper": "",
+      "description": "Generate a UNION ALL BY NAME query string that reads one HTS file through separate per-region table-function scans. The result adds filename, duckhts_region_shard_id, and duckhts_region_shard columns so benchmark queries can compare region-sharded execution and explicit ordered writes. Pass regions as a DuckDB list of region strings; params is appended to each reader call and should not include region. The generated UNION ALL does not deduplicate records; adjacent or overlapping shards can duplicate BAM alignments or BCF/VCF records that span shard boundaries, so add explicit shard-local filters or downstream deduplication when exact once-only semantics are required.",
+      "examples": [
+        "SET VARIABLE q = hts_region_union_query('read_bam', 'sample.bam', ['chr1:1-1000000','chr1:1000001-2000000']); SELECT * FROM query(getvariable('q'));",
+        "SET VARIABLE q = hts_region_union_query('read_bcf', 'cohort.vcf.gz', string_split('22:16000000-16999999,22:17000000-17999999', ','), 'tidy_format := true'); SELECT * FROM query(getvariable('q'));"
+      ]
+    },
+    {
       "name": "seq_revcomp",
       "kind": "scalar",
       "category": "Sequence UDFs",
       "signature": "seq_revcomp(sequence)",
       "returns": "VARCHAR",
       "r_wrapper": "",
-      "description": "Compute the reverse complement of a DNA sequence using A, C, G, T, and N bases.",
+      "description": "Compute the reverse complement of a DNA sequence using A, C, G, T, and N bases. Overloaded: accepts either a VARCHAR text sequence (returns VARCHAR) or a UTINYINT[] of htslib nt16 codes as produced by read_bam(sequence_encoding := 'nt16') (returns UTINYINT[]); the nt16 overload is bit-identical to the text path after decoding, so BAM pipelines can reverse-complement without leaving the nt16 encoding.",
       "examples": [
-        "SELECT seq_revcomp('ACGTN');"
+        "SELECT seq_revcomp('ACGTN');",
+        "SELECT seq_revcomp(SEQ) FROM read_bam('reads.bam', sequence_encoding := 'nt16');"
       ]
     },
     {
@@ -1004,9 +1129,10 @@
       "signature": "seq_canonical(sequence)",
       "returns": "VARCHAR",
       "r_wrapper": "",
-      "description": "Return the lexicographically smaller of a sequence and its reverse complement.",
+      "description": "Return the lexicographically smaller of a sequence and its reverse complement. Overloaded: accepts either a VARCHAR text sequence (returns VARCHAR) or a UTINYINT[] of htslib nt16 codes as produced by read_bam(sequence_encoding := 'nt16') (returns UTINYINT[]); the nt16 overload compares by decoded base order and is bit-identical to the text path after decoding.",
       "examples": [
-        "SELECT seq_canonical('ACGTN');"
+        "SELECT seq_canonical('ACGTN');",
+        "SELECT seq_canonical(SEQ) FROM read_bam('reads.bam', sequence_encoding := 'nt16');"
       ]
     },
     {
@@ -1016,7 +1142,7 @@
       "signature": "seq_hash_2bit(sequence)",
       "returns": "UBIGINT",
       "r_wrapper": "",
-      "description": "Encode a short DNA sequence as a 2-bit unsigned integer hash.",
+      "description": "Encode a short DNA sequence as a 2-bit unsigned integer hash. Overloaded to also accept a UTINYINT[] of htslib nt16 codes (from read_bam(sequence_encoding := 'nt16')); non-ACGT codes yield NULL, bit-identical to the text path.",
       "examples": [
         "SELECT seq_hash_2bit('ACGT');"
       ]
@@ -1052,9 +1178,10 @@
       "signature": "seq_gc_content(sequence)",
       "returns": "DOUBLE",
       "r_wrapper": "",
-      "description": "Compute GC fraction for a DNA sequence as a value between 0 and 1.",
+      "description": "Compute GC fraction for a DNA sequence as a value between 0 and 1. Overloaded: accepts either a VARCHAR text sequence or a UTINYINT[] of htslib nt16 codes as produced by read_bam(sequence_encoding := 'nt16'); the nt16 overload classifies codes directly and is bit-identical to the text path, so BAM pipelines can compute GC without decoding sequences back to text.",
       "examples": [
-        "SELECT seq_gc_content('ACGT');"
+        "SELECT seq_gc_content('ACGT');",
+        "SELECT seq_gc_content(SEQ) FROM read_bam('reads.bam', sequence_encoding := 'nt16');"
       ]
     },
     {
@@ -1112,7 +1239,7 @@
       "signature": "cigar_has_soft_clip(cigar)",
       "returns": "BOOLEAN",
       "r_wrapper": "",
-      "description": "Test whether a CIGAR string contains any soft-clipped segment (`S`).",
+      "description": "Test whether a CIGAR string contains any soft-clipped segment (`S`). Overloaded to also accept a UINTEGER[] binary CIGAR (as produced by read_bam(cigar_representation := 'binary')); the binary overload is bit-identical to the text path.",
       "examples": [
         "SELECT cigar_has_soft_clip('5S90M5S');"
       ]
@@ -1124,7 +1251,7 @@
       "signature": "cigar_has_hard_clip(cigar)",
       "returns": "BOOLEAN",
       "r_wrapper": "",
-      "description": "Test whether a CIGAR string contains any hard-clipped segment (`H`).",
+      "description": "Test whether a CIGAR string contains any hard-clipped segment (`H`). Overloaded to also accept a UINTEGER[] binary CIGAR (as produced by read_bam(cigar_representation := 'binary')); the binary overload is bit-identical to the text path.",
       "examples": [
         "SELECT cigar_has_hard_clip('5H95M');"
       ]
@@ -1136,7 +1263,7 @@
       "signature": "cigar_left_soft_clip(cigar)",
       "returns": "BIGINT",
       "r_wrapper": "",
-      "description": "Return the left-end soft-clipped length from a CIGAR string, or zero if the alignment does not start with `S`.",
+      "description": "Return the left-end soft-clipped length from a CIGAR string, or zero if the alignment does not start with `S`. Overloaded to also accept a UINTEGER[] binary CIGAR (as produced by read_bam(cigar_representation := 'binary')); the binary overload is bit-identical to the text path.",
       "examples": [
         "SELECT cigar_left_soft_clip('5S90M5S');"
       ]
@@ -1148,7 +1275,7 @@
       "signature": "cigar_right_soft_clip(cigar)",
       "returns": "BIGINT",
       "r_wrapper": "",
-      "description": "Return the right-end soft-clipped length from a CIGAR string, or zero if the alignment does not end with `S`.",
+      "description": "Return the right-end soft-clipped length from a CIGAR string, or zero if the alignment does not end with `S`. Overloaded to also accept a UINTEGER[] binary CIGAR (as produced by read_bam(cigar_representation := 'binary')); the binary overload is bit-identical to the text path.",
       "examples": [
         "SELECT cigar_right_soft_clip('5S90M5S');"
       ]
@@ -1160,7 +1287,7 @@
       "signature": "cigar_query_length(cigar)",
       "returns": "BIGINT",
       "r_wrapper": "",
-      "description": "Return the query-consuming length from a CIGAR string, counting `M`, `I`, `S`, `=`, and `X`.",
+      "description": "Return the query-consuming length from a CIGAR string, counting `M`, `I`, `S`, `=`, and `X`. Overloaded to also accept a UINTEGER[] binary CIGAR (as produced by read_bam(cigar_representation := 'binary')); the binary overload is bit-identical to the text path.",
       "examples": [
         "SELECT cigar_query_length('5S90M5I');"
       ]
@@ -1172,7 +1299,7 @@
       "signature": "cigar_aligned_query_length(cigar)",
       "returns": "BIGINT",
       "r_wrapper": "",
-      "description": "Return the aligned query length from a CIGAR string, counting `M`, `=`, and `X` but excluding clips and insertions.",
+      "description": "Return the aligned query length from a CIGAR string, counting `M`, `=`, and `X` but excluding clips and insertions. Overloaded to also accept a UINTEGER[] binary CIGAR (as produced by read_bam(cigar_representation := 'binary')); the binary overload is bit-identical to the text path.",
       "examples": [
         "SELECT cigar_aligned_query_length('5S90M5I');"
       ]
@@ -1184,7 +1311,7 @@
       "signature": "cigar_reference_length(cigar)",
       "returns": "BIGINT",
       "r_wrapper": "",
-      "description": "Return the reference-consuming length from a CIGAR string, counting `M`, `D`, `N`, `=`, and `X`.",
+      "description": "Return the reference-consuming length from a CIGAR string, counting `M`, `D`, `N`, `=`, and `X`. Overloaded to also accept a UINTEGER[] binary CIGAR (as produced by read_bam(cigar_representation := 'binary')); the binary overload is bit-identical to the text path.",
       "examples": [
         "SELECT cigar_reference_length('90M5D');"
       ]
@@ -1196,7 +1323,7 @@
       "signature": "cigar_has_op(cigar, op)",
       "returns": "BOOLEAN",
       "r_wrapper": "",
-      "description": "Test whether a CIGAR string contains at least one instance of the requested operator.",
+      "description": "Test whether a CIGAR string contains at least one instance of the requested operator. Overloaded to also accept a UINTEGER[] binary CIGAR (as produced by read_bam(cigar_representation := 'binary')); the binary overload is bit-identical to the text path.",
       "examples": [
         "SELECT cigar_has_op('5S90M5S', 'S');"
       ]

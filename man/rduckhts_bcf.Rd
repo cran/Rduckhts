@@ -12,7 +12,9 @@ rduckhts_bcf(
   index_path = NULL,
   tidy_format = FALSE,
   additional_csq_column_types = NULL,
+  scan_mode = NULL,
   decompression_threads = 0,
+  decode_error_policy = "null",
   overwrite = FALSE
 )
 }
@@ -32,9 +34,18 @@ rduckhts_bcf(
 \item{additional_csq_column_types}{Optional bcftools-style `PATTERN TYPE`
 overrides for CSQ/ANN/BCSQ subfield typing, separated by newlines or `;`}
 
+\item{scan_mode}{Optional scan mode. Use \code{"auto"} (default extension
+behavior) or \code{"sequential"} to force full-file streaming instead of index-backed
+count/parallel scan paths. Sequential mode is incompatible with `region`.}
+
 \item{decompression_threads}{Integer. Number of htslib decompression worker
 threads per file handle. Default `0`. Use `0` to keep BCF/VCF reads
 single-threaded.}
+
+\item{decode_error_policy}{Character. Dirty/corrupt BCF decode policy:
+\code{"null"} returns NULL for header-vs-payload type clashes,
+\code{"warn"} emits a DuckHTS warning and returns NULL, and
+\code{"error"} raises a DuckDB/R error.}
 
 \item{overwrite}{Logical. If TRUE, overwrites existing table}
 }

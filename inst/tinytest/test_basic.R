@@ -31,6 +31,10 @@ expect_true(exists("rduckhts_hts_index"))
 expect_true(exists("rduckhts_hts_index_spans"))
 expect_true(exists("rduckhts_hts_index_raw"))
 expect_true(exists("rduckhts_liftover"))
+expect_true(exists("rduckhts_bcf_convert_parquet"))
+expect_true(exists("rduckhts_bam_convert_parquet"))
+expect_true(exists("rduckhts_gff_convert_parquet"))
+expect_true(exists("rduckhts_tabix_convert_parquet"))
 
 # Test function signatures
 expect_identical(
@@ -40,13 +44,14 @@ expect_identical(
 expect_identical(
   names(formals(rduckhts_bcf)),
   c("con", "table_name", "path", "region", "index_path", "tidy_format",
-    "additional_csq_column_types", "decompression_threads", "overwrite")
+    "additional_csq_column_types", "scan_mode", "decompression_threads",
+    "decode_error_policy", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_bam)),
   c("con", "table_name", "path", "region", "index_path", "reference",
     "standard_tags", "auxiliary_tags", "sequence_encoding",
-    "quality_representation", "cigar_representation", "decompression_threads", "overwrite")
+    "quality_representation", "cigar_representation", "scan_mode", "decompression_threads", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_pileup)),
@@ -93,7 +98,7 @@ expect_identical(
 expect_identical(
   names(formals(rduckhts_fasta)),
   c("con", "table_name", "path", "region", "index_path",
-    "gzi_path", "sequence_encoding", "overwrite")
+    "gzi_path", "sequence_encoding", "scan_mode", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_fasta_index)),
@@ -103,7 +108,7 @@ expect_identical(
   names(formals(rduckhts_fastq)),
   c("con", "table_name", "path", "mate_path", "interleaved",
     "sequence_encoding", "quality_representation", "input_quality_encoding",
-    "overwrite")
+    "scan_mode", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_detect_quality_encoding)),
@@ -112,19 +117,19 @@ expect_identical(
 expect_identical(
   names(formals(rduckhts_gff)),
   c("con", "table_name", "path", "region", "index_path", "header",
-    "header_names", "auto_detect", "column_types", "attributes_map",
+    "header_names", "auto_detect", "column_types", "scan_mode", "attributes_map",
     "attributes_list", "attributes_pairs", "strict", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_gtf)),
   c("con", "table_name", "path", "region", "index_path", "header",
-    "header_names", "auto_detect", "column_types", "attributes_map",
+    "header_names", "auto_detect", "column_types", "scan_mode", "attributes_map",
     "attributes_list", "attributes_pairs", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_tabix)),
   c("con", "table_name", "path", "region", "index_path", "header",
-    "header_names", "auto_detect", "column_types", "overwrite")
+    "header_names", "auto_detect", "column_types", "scan_mode", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_tabix_index)),
@@ -156,6 +161,35 @@ expect_identical(
   c("con", "query", "chain_path", "dst_fasta_ref", "chrom_col", "pos_col",
     "ref_col", "alt_col", "src_fasta_ref", "max_snp_gap", "max_indel_inc",
     "lift_mt", "end_pos_col", "no_left_align")
+)
+expect_identical(
+  names(formals(rduckhts_bcf_convert_parquet)),
+  c("con", "path", "output", "columns", "region", "index_path", "tidy_format",
+    "additional_csq_column_types", "decompression_threads", "where", "compression",
+    "row_group_size", "partition_by", "include_metadata", "header_text", "metadata",
+    "metadata_json_file", "write_format_version", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_bam_convert_parquet)),
+  c("con", "path", "output", "columns", "region", "index_path", "reference",
+    "standard_tags", "auxiliary_tags", "sequence_encoding", "quality_representation",
+    "cigar_representation", "decompression_threads", "where", "compression",
+    "row_group_size", "partition_by", "include_metadata", "header_text", "metadata",
+    "metadata_json_file", "write_format_version", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_gff_convert_parquet)),
+  c("con", "path", "output", "columns", "region", "index_path", "header",
+    "header_names", "auto_detect", "column_types", "attributes_map", "attributes_list",
+    "attributes_pairs", "strict", "where", "compression", "row_group_size", "partition_by",
+    "include_metadata", "header_text", "metadata", "metadata_json_file", "write_format_version", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_tabix_convert_parquet)),
+  c("con", "path", "output", "columns", "region", "index_path", "header",
+    "header_names", "auto_detect", "column_types", "where", "compression", "row_group_size",
+    "partition_by", "include_metadata", "header_text", "metadata", "metadata_json_file", "write_format_version",
+    "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_munge)),
@@ -255,6 +289,7 @@ expect_error(rduckhts_bcf(NULL, "test", "nonexistent.vcf"))
 expect_error(rduckhts_bam(NULL, "test", "nonexistent.bam"))
 expect_error(rduckhts_bam(NULL, "test", "nonexistent.bam", decompression_threads = -1))
 expect_error(rduckhts_bam(NULL, "test", "nonexistent.bam", decompression_threads = 1.5))
+expect_error(rduckhts_bam(NULL, "test", "nonexistent.bam", scan_mode = "parallel"))
 expect_error(rduckhts_bam_index(NULL, "nonexistent.bam"))
 expect_error(rduckhts_bcf_index(NULL, "nonexistent.vcf.gz"))
 expect_error(rduckhts_bgzip(NULL, "nonexistent.txt"))
@@ -288,44 +323,44 @@ expect_identical(
   names(formals(rduckhts_bam_multi)),
   c("con", "table_name", "files", "region", "index_path", "reference",
     "standard_tags", "auxiliary_tags", "sequence_encoding",
-    "quality_representation", "cigar_representation", "decompression_threads", ".params", "overwrite")
+    "quality_representation", "cigar_representation", "scan_mode", "decompression_threads", ".params", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_bcf_multi)),
   c("con", "table_name", "files", "region", "index_path", "tidy_format",
-    "additional_csq_column_types", "decompression_threads", ".params", "overwrite")
+    "additional_csq_column_types", "scan_mode", "decompression_threads", ".params", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_fastq_multi)),
   c("con", "table_name", "files", "mate_path", "interleaved",
     "sequence_encoding", "quality_representation",
-    "input_quality_encoding", ".params", "overwrite")
+    "input_quality_encoding", "scan_mode", ".params", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_fasta_multi)),
   c("con", "table_name", "files", "region", "index_path",
-    "gzi_path", "sequence_encoding", ".params", "overwrite")
+    "gzi_path", "sequence_encoding", "scan_mode", ".params", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_bed_multi)),
-  c("con", "table_name", "files", "region", "index_path", ".params",
+  c("con", "table_name", "files", "region", "index_path", "scan_mode", ".params",
     "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_tabix_multi)),
   c("con", "table_name", "files", "region", "index_path", "header",
-    "header_names", "auto_detect", "column_types", ".params", "overwrite")
+    "header_names", "auto_detect", "column_types", "scan_mode", ".params", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_gff_multi)),
   c("con", "table_name", "files", "region", "index_path", "header",
-    "header_names", "auto_detect", "column_types", "attributes_map",
+    "header_names", "auto_detect", "column_types", "scan_mode", "attributes_map",
     "attributes_list", "attributes_pairs", "strict", ".params", "overwrite")
 )
 expect_identical(
   names(formals(rduckhts_gtf_multi)),
   c("con", "table_name", "files", "region", "index_path", "header",
-    "header_names", "auto_detect", "column_types", "attributes_map",
+    "header_names", "auto_detect", "column_types", "scan_mode", "attributes_map",
     "attributes_list", "attributes_pairs", ".params", "overwrite")
 )
 
@@ -333,5 +368,6 @@ expect_identical(
 expect_error(rduckhts_bam_multi(NULL, "t", "*.bam", .params = "not a data.frame"))
 expect_error(rduckhts_bam_multi(NULL, "t", "*.bam", .params = data.frame(x = 1)))
 expect_error(rduckhts_bam_multi(NULL, "t", "*.bam", decompression_threads = -1))
+expect_error(rduckhts_bam_multi(NULL, "t", "*.bam", scan_mode = "parallel"))
 
 message("All basic tests passed!")

@@ -1,7 +1,7 @@
 Package: Rduckhts
 Title: 'DuckDB' High Throughput Sequencing File Formats Reader
         Extension
-Version: 1.3.0-0.1.0
+Version: 1.4.0-0.1.0
 Authors@R: c(
     person(given = "Sounkou Mahamane", family = "Toure",
     email = "sounkoutoure@gmail.com",
@@ -29,7 +29,7 @@ URL: https://github.com/RGenomicsETL/duckhts,
         https://rgenomicsetl.r-universe.dev/Rduckhts
 BugReports: https://github.com/RGenomicsETL/duckhts/issues
 NeedsCompilation: no
-Packaged: 2026-05-29 15:36:29 UTC; sounkoutoure
+Packaged: 2026-07-09 23:44:04 UTC; sounkoutoure
 Author: Sounkou Mahamane Toure [aut, cre],
   James K Bonfield, John Marshall,Petr Danecek ,Heng Li , Valeriu Ohan,
     Andrew Whitwham,Thomas Keane , Robert M Davies [ctb] (Htslib
@@ -40,4 +40,4 @@ Author: Sounkou Mahamane Toure [aut, cre],
   DuckDB C Extension API Authors [ctb]
 Maintainer: Sounkou Mahamane Toure <sounkoutoure@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-05-29 20:10:02 UTC
+Date/Publication: 2026-07-10 05:40:08 UTC
