@@ -34,6 +34,7 @@ DEALINGS IN THE SOFTWARE.  */
 #include <errno.h>
 #include <assert.h>
 #include "htslib/hts.h"
+#include "htslib/hts_alloc.h"
 #include "htslib/sam.h"
 
 int sam_cap_mapq(bam1_t *b, const char *ref, hts_pos_t ref_len, int thres)
@@ -103,6 +104,19 @@ static int realn_check_tag(const uint8_t *tg, enum htsLogLevel severity,
     return 0;
 }
 
+static int realn_rename_tag(bam1_t *b, const uint8_t *value, uint8_t first_char) {
+    size_t value_offset;
+
+    if (!b->data || b->l_data < 3 || value < b->data + 3 ||
+        value > b->data + b->l_data)
+        return -1;
+
+    value_offset = (size_t) (value - b->data);
+    b->data[value_offset - 3] = first_char;
+
+    return 0;
+}
+
 int sam_prob_realn(bam1_t *b, const char *ref, hts_pos_t ref_len, int flag) {
     int k, bw, y, yb, ye, xb, xe, fix_bq = 0, apply_baq = flag & BAQ_APPLY,
         extend_baq = flag & BAQ_EXTEND, redo_baq = flag & BAQ_REDO;
@@ -167,11 +181,13 @@ int sam_prob_realn(bam1_t *b, const char *ref, hts_pos_t ref_len, int flag) {
         if (bq && apply_baq) { // then convert BQ to ZQ
             for (i = 0; i < c->l_qseq; ++i)
                 qual[i] = qual[i] + 64 < bq[i]? 0 : qual[i] - ((int)bq[i] - 64);
-            *(bq - 3) = 'Z';
+            if (realn_rename_tag(b, bq, 'Z') < 0)
+                return -4;
         } else if (zq && !apply_baq) { // then convert ZQ to BQ
             for (i = 0; i < c->l_qseq; ++i)
                 qual[i] += (int)zq[i] - 64;
-            *(zq - 3) = 'B';
+            if (realn_rename_tag(b, zq, 'B') < 0)
+                return -4;
         }
         return 0;
     }
@@ -219,7 +235,7 @@ int sam_prob_realn(bam1_t *b, const char *ref, hts_pos_t ref_len, int flag) {
         }
 
         assert(bq == NULL); // bq was used above, but should now be NULL
-        bq = malloc(align_lqseq * 3 + lref);
+        bq = hts_malloc_pse(3, align_lqseq, 0, lref);
         if (!bq) goto fail;
         q = bq + align_lqseq;
         tseq = q + align_lqseq;
@@ -233,7 +249,7 @@ int sam_prob_realn(bam1_t *b, const char *ref, hts_pos_t ref_len, int flag) {
             tref[i-xb] = seq_nt16_int[seq_nt16_table[(unsigned char)ref[i]]];
         }
 
-        state = malloc(c->l_qseq * sizeof(int));
+        state = hts_malloc_p(sizeof(int), c->l_qseq);
         if (!state) goto fail;
         if (probaln_glocal(tref, xe-xb, tseq, c->l_qseq, qual,
                            &conf, state, q) == INT_MIN) {

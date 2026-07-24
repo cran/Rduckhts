@@ -5,6 +5,7 @@ library(tinytest)
 expect_true(requireNamespace("Rduckhts", quietly = TRUE))
 
 # Test basic functions exist
+expect_true(exists("duckhts_build"))
 expect_true(exists("rduckhts_load"))
 expect_true(exists("rduckhts_bcf"))
 expect_true(exists("rduckhts_bam"))
@@ -20,6 +21,10 @@ expect_true(exists("rduckhts_samtools_idxstats"))
 expect_true(exists("rduckhts_fasta"))
 expect_true(exists("rduckhts_fasta_index"))
 expect_true(exists("rduckhts_fastq"))
+expect_true(exists("rduckhts_bigwig"))
+expect_true(exists("rduckhts_htslib_config"))
+expect_true(exists("rduckhts_htslib_info"))
+expect_true(exists("rduckhts_htslib_version"))
 expect_true(exists("rduckhts_detect_quality_encoding"))
 expect_true(exists("rduckhts_gff"))
 expect_true(exists("rduckhts_gtf"))
@@ -110,6 +115,16 @@ expect_identical(
     "sequence_encoding", "quality_representation", "input_quality_encoding",
     "scan_mode", "overwrite")
 )
+expect_identical(
+  names(formals(rduckhts_bigwig)),
+  c("con", "table_name", "path", "region", "blocks_per_iteration", "overwrite")
+)
+expect_identical(
+  names(formals(rduckhts_htslib_config)),
+  c("link", "validate")
+)
+expect_identical(names(formals(rduckhts_htslib_info)), "con")
+expect_identical(names(formals(rduckhts_htslib_version)), "con")
 expect_identical(
   names(formals(rduckhts_detect_quality_encoding)),
   c("con", "path", "max_records")
@@ -258,6 +273,18 @@ expect_true(file.exists(system.file(
   "functions.tsv",
   package = "Rduckhts"
 )))
+
+# The installed rebuild path and package bootstrap share one DuckVEP source
+# inventory. Every listed source must be present in the bundled tree.
+duckvep_kernel_sources <- getFromNamespace(
+  "duckhts_duckvep_kernel_source_files",
+  "Rduckhts"
+)()
+expect_true(length(duckvep_kernel_sources) > 0L)
+expect_true(all(file.exists(file.path(
+  system.file("duckhts_extension", "duckvep", "kernel", "src", package = "Rduckhts"),
+  duckvep_kernel_sources
+))))
 
 catalog <- rduckhts_functions()
 expect_true(is.data.frame(catalog))

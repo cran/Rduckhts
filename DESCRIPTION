@@ -1,7 +1,7 @@
 Package: Rduckhts
 Title: 'DuckDB' High Throughput Sequencing File Formats Reader
         Extension
-Version: 1.4.0-0.1.0
+Version: 1.5.0-0.1.0
 Authors@R: c(
     person(given = "Sounkou Mahamane", family = "Toure",
     email = "sounkoutoure@gmail.com",
@@ -10,6 +10,7 @@ Authors@R: c(
     person(given = "Brent", family = "Pedersen", role = "cph", comment = "Mosdepth Original Author"),
     person(given = "Giulio", family = "Genovese", email = "giulio.genovese@gmail.com", role = "cph", comment = "Author of BCFTools munge,score,liftover plugins"),
     person(given = "Nicola", family = "Asuni", role = "cph", comment = "Author of the VariantKey and RegionKey C API"),
+    person(given = "Devon", family = "Ryan", role = "cph", comment = "Author of libBigWig"),
     person(given = "DuckDB C Extension API Authors", role = "ctb")
     )
 Description: Bundles the 'duckhts' 'DuckDB' extension for reading High Throughput
@@ -23,13 +24,13 @@ SystemRequirements: GNU make, cmake, zlib, libbz2, liblzma, libcurl,
         openssl (development headers)
 Depends: R (>= 4.4.0)
 Imports: DBI, duckdb, utils
-Suggests: tinytest
-RoxygenNote: 7.3.3
+Suggests: Rtinycc, tinytest
 URL: https://github.com/RGenomicsETL/duckhts,
         https://rgenomicsetl.r-universe.dev/Rduckhts
 BugReports: https://github.com/RGenomicsETL/duckhts/issues
+RoxygenNote: 7.3.3
 NeedsCompilation: no
-Packaged: 2026-07-09 23:44:04 UTC; sounkoutoure
+Packaged: 2026-07-23 19:30:49 UTC; sounkoutoure
 Author: Sounkou Mahamane Toure [aut, cre],
   James K Bonfield, John Marshall,Petr Danecek ,Heng Li , Valeriu Ohan,
     Andrew Whitwham,Thomas Keane , Robert M Davies [ctb] (Htslib
@@ -37,7 +38,8 @@ Author: Sounkou Mahamane Toure [aut, cre],
   Brent Pedersen [cph] (Mosdepth Original Author),
   Giulio Genovese [cph] (Author of BCFTools munge,score,liftover plugins),
   Nicola Asuni [cph] (Author of the VariantKey and RegionKey C API),
+  Devon Ryan [cph] (Author of libBigWig),
   DuckDB C Extension API Authors [ctb]
 Maintainer: Sounkou Mahamane Toure <sounkoutoure@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-07-10 05:40:08 UTC
+Date/Publication: 2026-07-24 08:30:09 UTC
