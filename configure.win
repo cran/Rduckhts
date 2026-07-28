@@ -26,28 +26,56 @@ fi
 
 # Get R's compiler settings for Windows
 MAKE=`"${R_HOME}/bin/R" CMD config MAKE`
-CC=`"${R_HOME}/bin/R" CMD config CC`
+R_CONFIG_CC=`"${R_HOME}/bin/R" CMD config CC`
+# The Fedora-Clang CRAN-like job selects Clang without changing R's Makeconf.
+# Ordinary builds retain the compiler configured for R.
+CC="${DUCKHTS_CC:-${R_CONFIG_CC}}"
 AR=`"${R_HOME}/bin/R" CMD config AR`
 RANLIB=`"${R_HOME}/bin/R" CMD config RANLIB`
 R_CPPFLAGS=`"${R_HOME}/bin/R" CMD config CPPFLAGS`
 R_CFLAGS=`"${R_HOME}/bin/R" CMD config CFLAGS`
 R_CPICFLAGS=`"${R_HOME}/bin/R" CMD config CPICFLAGS`
 R_LDFLAGS=`"${R_HOME}/bin/R" CMD config LDFLAGS`
+if [ "${DUCKHTS_LDFLAGS+x}" = x ]; then
+    BASE_LDFLAGS="${DUCKHTS_LDFLAGS}"
+else
+    BASE_LDFLAGS="${R_LDFLAGS}"
+fi
 if [ -z "${RANLIB}" ]; then
     RANLIB=ranlib
 fi
 
 HTSLIB_DIR="${EXT_DIR}/htslib"
 DUCKDB_CAPI_HEADER="${EXT_DIR}/duckdb_capi/duckdb_extension.h"
-CFLAGS="${R_CFLAGS} ${R_CPICFLAGS} -O2 -fPIC -D_FILE_OFFSET_BITS=64"
+# A profile that intentionally selects another compiler can supply that
+# compiler's base flags without inheriting incompatible R Makeconf flags.
+BASE_CFLAGS="${DUCKHTS_CFLAGS:-${R_CFLAGS}}"
+CFLAGS="${BASE_CFLAGS} ${R_CPICFLAGS} -O2 -fPIC -D_FILE_OFFSET_BITS=64"
 # Keep htslib in a pre-C23 compiler mode.  GCC 16 defaults to GNU C23, whose
 # const-preserving string functions expose warnings in htslib 1.24.
 HTSLIB_CFLAGS="${CFLAGS} -std=gnu17"
-# Keep stricter diagnostics on DuckHTS extension sources without applying them
-# to the vendored htslib build.
-EXT_CFLAGS="${CFLAGS} -Wpedantic -DNOCURL=1"
+# Released package builds preserve the warning policy supplied by R and the
+# installation environment. CI opts into warning-as-error checks for DuckHTS
+# and bundled libBigWig sources; htslib retains its upstream warning policy.
+DUCKHTS_STRICT_WARNINGS="${DUCKHTS_STRICT_WARNINGS:-0}"
+case "${DUCKHTS_STRICT_WARNINGS}" in
+    0|1) ;;
+    *)
+        echo "ERROR: DUCKHTS_STRICT_WARNINGS must be 0 or 1 (got '${DUCKHTS_STRICT_WARNINGS}')"
+        exit 1
+        ;;
+esac
+EXT_WARNING_FLAGS="-Wall -Wextra -Wpedantic -Wformat=2 -Wstrict-prototypes"
+if [ "${DUCKHTS_STRICT_WARNINGS}" = "1" ]; then
+    EXT_WARNING_FLAGS="${EXT_WARNING_FLAGS} -Werror"
+fi
+EXT_CFLAGS="${CFLAGS} ${EXT_WARNING_FLAGS} -DNOCURL=1"
+# These are imported upstream implementation files. Keep their diagnostics
+# separate from the DuckHTS gate; cgranges and htslib/bcftools are maintained
+# through pinned sources and explicit patches rather than local warning churn.
+UPSTREAM_CFLAGS="${CFLAGS} -w -DNOCURL=1"
 CPPFLAGS="${R_CPPFLAGS} -DNDEBUG"
-LDFLAGS="${R_LDFLAGS}"
+LDFLAGS="${BASE_LDFLAGS}"
 
 HTSLIB_VERSION_STR=`tr -d '\r\n' < "${HTSLIB_DIR}/VERSION" 2>/dev/null || true`
 HTSLIB_VERSION_NUMBER=`awk '/^#define[[:space:]]+HTS_VERSION[[:space:]]+[0-9]+/ {print $3; exit}' "${HTSLIB_DIR}/htslib/hts.h" 2>/dev/null || true`
@@ -76,22 +104,43 @@ else
     DUCKDB_VERSION="v1.2.0"
 fi
 
+normalize_windows_target_arch() {
+    case "$1" in
+        aarch64*|arm64*) echo arm64 ;;
+        x86_64*|amd64*) echo amd64 ;;
+        *) return 1 ;;
+    esac
+}
+
 OS_NAME=`uname -s`
-ARCH_NAME=`uname -m`
-DUCKDB_PLATFORM=""
 case "${OS_NAME}" in
-    *MINGW*|*MSYS*|*CYGWIN*)
-        case "${ARCH_NAME}" in
-            x86_64) DUCKDB_PLATFORM="windows_amd64_mingw";;
-            aarch64|arm64) DUCKDB_PLATFORM="windows_arm64_mingw";;
-        esac
+    *MINGW*|*MSYS*|*CYGWIN*) ;;
+    *)
+        echo "ERROR: Unsupported Windows build shell: ${OS_NAME}"
+        exit 1
         ;;
 esac
 
-if [ -z "${DUCKDB_PLATFORM}" ]; then
-    echo "ERROR: Unsupported platform: ${OS_NAME}/${ARCH_NAME}"
+R_TARGET=`"${R_HOME}/bin/R" --vanilla --slave -e 'cat(R.Version()[["platform"]])'`
+R_TARGET_ARCH=`normalize_windows_target_arch "${R_TARGET}" 2>/dev/null || true`
+if [ -z "${R_TARGET_ARCH}" ]; then
+    echo "ERROR: Unsupported R target platform: ${R_TARGET}"
     exit 1
 fi
+
+CC_TARGET=`${CC} -dumpmachine 2>/dev/null || true`
+CC_TARGET_ARCH=`normalize_windows_target_arch "${CC_TARGET}" 2>/dev/null || true`
+if [ -z "${CC_TARGET_ARCH}" ]; then
+    echo "ERROR: Could not determine the Windows compiler target from '${CC} -dumpmachine': ${CC_TARGET}"
+    exit 1
+fi
+if [ "${CC_TARGET_ARCH}" != "${R_TARGET_ARCH}" ]; then
+    echo "ERROR: R/compiler target mismatch: R=${R_TARGET}, compiler=${CC_TARGET}"
+    exit 1
+fi
+
+DUCKDB_PLATFORM="windows_${R_TARGET_ARCH}_mingw"
+echo "Windows target receipt: R=${R_TARGET}, compiler=${CC_TARGET}, DuckDB=${DUCKDB_PLATFORM}"
 
 echo "---------- Checking for required libraries (Windows) ----------"
 
@@ -376,7 +425,11 @@ OBJECT_FILES=""
 for src_file in $C_SOURCES; do
     obj_file="${src_file%.c}.o"
     echo "  Compiling $src_file -> $obj_file"
-    ${CC} ${EXT_CFLAGS} ${CPPFLAGS} ${INCLUDES} -c "$src_file" -o "$obj_file"
+    src_cflags="${EXT_CFLAGS}"
+    case "$src_file" in
+        cgranges.c|bcftools_filter.c) src_cflags="${UPSTREAM_CFLAGS}" ;;
+    esac
+    ${CC} ${src_cflags} ${CPPFLAGS} ${INCLUDES} -c "$src_file" -o "$obj_file"
     if [ $? -ne 0 ]; then
         echo "ERROR: Failed to compile $src_file"
         exit 1

@@ -1,5 +1,45 @@
 
-# Rduckhts 1.5.0-0.1.0
+# Rduckhts 1.5.1-0.1.3
+- derive the Windows DuckDB extension platform from R's target and require the
+  compiler target to agree, instead of trusting the architecture reported by
+  the MSYS shell. Native Windows ARM64 package coverage now builds a clean
+  source tarball, installs it, loads the `windows_arm64_mingw` extension, and
+  validates the bundled htslib receipt
+- preserve R and site compiler-warning policy during released package installs
+  instead of promoting every externally enabled warning to an error. Strict
+  package-owned diagnostics remain an explicit CI gate, vendored htslib headers
+  are system includes in Unix-like package builds, and the macOS package check
+  reproduces CRAN M1Mac's conversion-warning flags
+- add `rduckhts_connect()` as the single package-owned connection path. It
+  explicitly permits the locally compiled bundled extension, uses temporary
+  DuckDB extension/secret storage when supported, and disables implicit known-
+  extension installation and loading. Package examples and extension-dependent
+  tinytests now use this path, including on CRAN's Linux libc++ builds where the
+  `duckdb` package otherwise disables extension loading. `duckhts_load(NULL)`
+  delegates to the same connection contract, while `rduckhts_load()` remains
+  available for caller-owned connections. File-backed connections reject a
+  reused DuckDB driver, whose creation policy cannot be changed, and release a
+  newly owned driver if connection or extension loading fails
+
+# Rduckhts 1.5.1-0.1.0
+- make bundled-extension compilation promote DuckHTS and libBigWig diagnostics
+  to errors by default, including CRAN-like Fedora Clang builds
+- bundle the `bcftools_norm_row` out-of-memory cleanup correction so a failed
+  internal allocation cannot use an indeterminate allele-buffer count
+- bundle the libBigWig strict-prototype correction so macOS Clang package
+  installation no longer warns about the `bwCleanup` definition
+- bundle VEP-116-compatible gVCF event dispatch: expanded `<NON_REF>`, bare
+  `*`, and `.` ALT rows produce no annotations; literal ALTs from mixed records
+  remain small variants; and `<*>` produces the generic coding or retained
+  start/stop consequence with empty HGVS. Record-level `INFO/END` remains
+  provenance for literal ALTs and `<*>`. The package docs and tests also warn
+  that VEP 116's literal allele-length handling can emit an ablation term when
+  a long-REF `<*>` row completely contains a feature
+- remove the DuckHTS-source diagnostics reported by the Debian and Windows
+  win-builder package pretests, including the MinGW hidden-visibility warnings
+- link the package DuckVEP documentation to the illustrated whole-genome
+  DuckVEP/FastVEP speed, memory, VEP-conformance, fastSA-versus-SQL provider,
+  algorithm-design, and test-infrastructure report
 - make the in-memory downstream htslib consumer test compatible with both the
   original and argument-capable `Rtinycc::tcc_call_symbol()` APIs, and bundle
   bounds-checked BAQ tag renaming so GCC 11 package builds do not emit the
