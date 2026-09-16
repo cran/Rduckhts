@@ -1,3 +1,181 @@
+# Rduckhts 1.5.2-0.1.5
+
+This package bundles DuckHTS 1.5.2.
+
+## Sample identity and contamination
+
+- Add a runnable README workflow from bundled VCF `FORMAT/AD` extraction through
+  packed sketches, relatedness, CHARR, and directional matched contamination.
+- Add `rduckhts_somalier_import_sites()` for converting an already selected
+  sites VCF/BCF into the typed panel and population-frequency relation, with
+  allele and frequency orientation kept together.
+- Add `rduckhts_somalier_bam_counts()` for panel-aligned BAM/CRAM A/B/other
+  extraction with explicit reference/index inputs, read/base filters, overlap
+  policy, resource limits and transport settings. A committed panel relation or
+  Parquet file is prepared once; `worker_count` controls native DuckDB scan
+  jobs with isolated reader/reference state and bounded hash-indexed overlap
+  names, while `decompression_threads` separately controls htslib workers per
+  handle. Indexed requests use resolved reference IDs, preserving valid contig
+  names that contain region-expression punctuation. Returned data frames are
+  ordered by site index; caller TEMP panels and uncommitted changes are not
+  visible during retained-connection panel preparation.
+- CRAM extraction preserves the alignment file's original `@SQ` lengths and
+  accepts a non-colocated explicit FASTA index without creating a default
+  reference sidecar.
+- Add `rduckhts_somalier_vcf_counts()` for complete panel-aligned VCF/BCF
+  `FORMAT/AD` evidence with exact allele-slot mapping, explicit FILTER policy,
+  unavailable-site rows and source record/sample provenance.
+- Add `rduckhts_somalier_sketches()` and
+  `rduckhts_somalier_relatedness()` for panel-checked count evidence,
+  reusable packed sketches and selected-pair statistics. Tables or ordinary
+  Parquet files can supply inputs and retain typed results; unavailable count
+  tuples remain distinct from measured zero counts.
+- Bundled SQL `duckhts_somalier_verify_relatedness()` checks persisted pair
+  results against their sealed sketches, including identity, denominators,
+  metrics and nullable numerical status.
+- Bundled SQL `duckhts_somalier_verify_sketches()` rebuilds sketches from
+  retained evidence and detects raw-count or availability changes even when
+  the classified genotype is unchanged. Invalid retained classification
+  settings return false instead of becoming rebuild-aggregate settings.
+- Add `rduckhts_somalier_charr()` and
+  `rduckhts_somalier_matched_contamination()` over measured count channels and
+  aligned population-B allele frequencies. They retain numerical status and
+  usable-site denominators, and reject changed panel/evidence identity. The
+  matched method preserves receiver/anchor direction and evaluates only
+  requested ordered pairs without a pair-sized native workspace. CHARR results
+  are stable across parallel aggregate reduction order.
+- Bound sample and assembly identities retained by bundled sketch, CHARR, and
+  matched-contamination states to 1,024 bytes, including persisted inputs.
+  Panel assembly and region are checked before hash encoding.
+- Preserve strict binomial-tail cutoffs with outward-rounded comparisons and a
+  per-call `max_threshold_work` limit shared across distinct measured depths
+  for both contamination wrappers; exhaustion errors without partial results.
+  Sketches constructed with IEEE negative-zero balance settings round-trip.
+- The bundled estimators use stable high-depth CHARR tail evaluation and a
+  full-grid matched search. Their documented numerical counterexamples can
+  differ from Somalier v0.3.4 output; they are not bitwise CLI replicas.
+
+## Genotypes and variant readers
+
+- Add `rduckhts_geno()` for typed arbitrary-ploidy GT/PS calls and
+  `rduckhts_bcf_samples()` for original-header sample identities. Sample
+  selection retains original sample indices; sparse scans preserve variant
+  records while omitting calls without a called ALT.
+- Select extra typed FORMAT fields with
+  `format_fields = c("AD", "DP", "GQ")`, including values on records without GT.
+  Header types/cardinalities and missing elements remain intact. Single-file
+  and multi-file BCF wrappers also support per-call sample selection.
+- Use `include_filter = TRUE` to retain the same physical VCF/BCF record's
+  FILTER beside typed calls; PASS, unapplied dot and named failures remain
+  distinguishable without a separate reader join.
+- Preserve an unapplied FILTER dot as NULL in bundled `read_bcf()` rather than
+  reporting it as `[PASS]`.
+- Use `raw_gt = TRUE` to retain exact original VCF genotype text, including
+  leading phase markers and literal missing alleles. BCF rejects this option
+  because it does not store the original text.
+- Preserve CSQ/ANN/BCSQ on every tidy sample row, selected-sample PS values with
+  BCF padding, and HTSlib's VCF 4.4 genotype phase spelling. Malformed numeric
+  scalar INFO/FORMAT fields follow `decode_error_policy` rather than being
+  silently truncated.
+- Preserve duplicate records, literal colon-bearing contigs and indexed VCF
+  records absent from a partial header. Prepared BCF/VCF scans pin their parsed
+  indexes; reprepare to use a changed index. Data/header contents must remain
+  unchanged and the initial index must match.
+
+## DuckVEP annotation and haplotype replay
+
+- Add `rduckhts_haplotypes()` for shared CDS/protein paths with complete carrier
+  and contributor evidence, coding blocks, local coding status and aligned
+  CDS/protein differences. Per-call capacities bound native replay, alignment
+  and HGVS storage; exhaustion raises errors. DuckDB input/output memory is
+  outside the native workspace limit.
+- Support explicit decoded-call phase policies and
+  `input_mode = "source_records"` for original GT spelling and complete ALT
+  lists. Preserve missing/unphased, conditional, overwritten and noncoding
+  contributors. Known REF slots remain distinct from selected skipped ALTs.
+  Model/REF failures retain unavailable sequence rather than fabricated output.
+- Add `hgvs = TRUE` for supported protein HGVS with explicit unsupported states
+  and `max_hgvs_reference_bytes`. Frame restoration does not erase physical
+  edits or downstream contributors; `stop_in_displaced_frame` is not a protein
+  rescue prediction. `nominal_length_diff` differs from rebuilt CDS length
+  when source replacement clipping changes the applied span.
+- Correct bundled SNV/MNV/indel consequences and protein HGVS around phase-padded
+  CDS starts, partial terminal codons, UTR/CDS transitions and transcript ends.
+  N-containing codons use pinned VEP-116 consensus where defined; literal REF
+  validation and unavailable-context states remain explicit.
+- Match VEP-116 transcript HGVS for literal SNPs whose CDS begins after a
+  noncoding exon, clipped coordinate ordering and reverse-strand insertions
+  shifted immediately outside transcript start. Returned HGVS columns are
+  accession-free bodies; model metadata supplies serialized identifiers.
+- Expose bundled `duckvep_transcript_projection()`,
+  `duckvep_breakend_geometry()` and `duckvep_repeat_alleles()` through SQL/DBI.
+  These provide typed transcript display, raw BND preparation and bounded
+  paired exact-repeat preparation. Correct the paired-BND truncation/intergenic union.
+  BND replacement text is not inserted-only sequence; repeat summaries do not
+  establish an exact allele. Transcript display shares decoded reference
+  sequences and extracts local codon spans to reduce per-event memory use.
+- Handle empty known regions, invalid/short CDS models and all-NULL phase lists
+  safely. Nested/concurrent model or haplotype preparation returns a busy error;
+  completed scans retain independent state.
+
+Haplotype replay remains alpha: local coding facts and supported protein HGVS
+are not complete whole-haplotype SO/IMPACT/NMD, compound DNA HGVS, structural
+composition or altered-splicing prediction. Strict phase policy does not select
+a different HGVS nomenclature standard. Pinned Ensembl VEP 116 is the
+compatibility target, with unresolved cases and policy differences preserved.
+Circular annotation and mapped MANE-on-GRCh37 enrichment are not provided.
+
+## Reader safety and reference handling
+
+- Retain no-coordinate BAM/CRAM reads exactly once in automatic full-file scans,
+  including older indexes without tail counts. Read/iterator and reader-state
+  allocation failures return recoverable DBI errors instead of partial output.
+- Reject empty region-list items and malformed known-contig intervals.
+  NULL/empty-string selection still means no filter; repeated FASTA requests
+  retain repeated rows and literal comma/colon contig names.
+- Return BAM `FILE_OFFSET` only for BGZF BAM, as the virtual position after
+  each record. SAM, CRAM and uncompressed BAM return missing values; use explicit
+  SQL ordering when required.
+- Report BAM CIGAR/AUX/SAMPLE_ID, INFO/FORMAT/GT and list-allocation failures
+  without fabricated missing fields, lost buffers or unusable connections.
+  Decoded-capacity overflow is distinct from out-of-memory failure.
+- Keep normalization/munging reference caches thread-owned and bounded to eight
+  handles and eight 64-KiB windows per thread, preserving aliases and per-call
+  remote-I/O settings. `rduckhts_fasta_nuc()` reports reference-fetch errors
+  instead of omitting intervals.
+- Bound bundled liftover clip-pad alignment to 4,194,304 cells and return
+  recoverable errors for malformed bundled bcftools score filters.
+
+## Installation, compatibility and migration
+
+- Provide concise function summaries and a bundled SQL reference with signatures,
+  return schemas, usage contracts and examples, linked from the package README.
+- Quote wrapper paths/options through DBI literals and object names through DBI
+  identifiers, while preserving explicitly documented SQL-expression arguments.
+- Compile a registered R native library so binary repositories record the actual
+  target architecture. Binary publication checks the package `Built` field
+  against the bundled extension metadata.
+- Keep live-database rejection tests independent of DuckDB error wording,
+  checking connection/driver validity and unchanged unsigned-extension policy
+  across the tested released and upcoming DuckDB R versions.
+- Remove experimental bundled `read_bcf_v2` and `read_bcf_appender`. Use
+  `read_bcf()` or supported R wrappers with projection, explicit sequential
+  mode where needed, and DuckDB CTAS/INSERT/COPY for materialization.
+  Experimental-only arguments are not transferred.
+- Remove the unsupported `duckhts_build()` manual compiler. Package configure
+  scripts own compilation; maintainer dependency installation is explicit.
+- Custom DuckVEP model queries use the 13-column complete-flank or 11-column
+  CDS-only form. The 12-column short-tail form and `post_cds_bases` are removed.
+  Alpha coding blocks use `event_indices` for physical-edit provenance,
+  replacing the count-only field.
+
+# Rduckhts 1.5.1-0.1.4
+- declare `NeedsCompilation: yes` because package configuration compiles
+  target-specific DuckHTS and htslib artifacts outside the conventional R
+  `src/` directory. Binary repositories can no longer treat an x86_64 package
+  as architecture-independent and reuse it on Linux ARM64. Native Linux ARM64
+  coverage now builds and audits a clean source tarball, installs it, loads the
+  `linux_arm64` extension, and validates the bundled htslib receipt
 
 # Rduckhts 1.5.1-0.1.3
 - derive the Windows DuckDB extension platform from R's target and require the

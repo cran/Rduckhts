@@ -18,6 +18,7 @@ void duckvep_nmd_predict(
     uint32_t variant_end1;
     uint32_t variant_cds_start;
     uint32_t variant_cds_end;
+    uint32_t coding_first1;
     int early_cds_escape;
     uint8_t reasons = 0u;
 
@@ -43,8 +44,22 @@ void duckvep_nmd_predict(
         out->prediction = (uint8_t)DUCKVEP_NMD_UNRESOLVED;
         return;
     }
+    exon_offset = transcripts->exon_offset[tx_idx];
+    exon_count = transcripts->exon_count[tx_idx];
+    if (exon_count == 0u || exon_offset > exons->exon_count ||
+        (size_t)exon_count > exons->exon_count - exon_offset) {
+        out->prediction = (uint8_t)DUCKVEP_NMD_UNRESOLVED;
+        return;
+    }
+    coding_first1 = transcripts->strand[tx_idx] < 0
+        ? transcripts->cds_end1[tx_idx] : transcripts->cds_start1[tx_idx];
 
+    /* Cached edit facts use physical CDS padding. They are also feature
+     * coordinates when coding begins in the first transcript exon. For a
+     * later CDS start, let the shared VEP mapper resolve the feature phase. */
     if (sequence_delta != NULL && sequence_delta->valid != 0u &&
+        coding_first1 >= exons->start1[exon_offset] &&
+        coding_first1 <= exons->end1[exon_offset] &&
         sequence_delta->nmd_early_cds_fact !=
             (uint8_t)DUCKVEP_NMD_EARLY_CDS_UNKNOWN) {
         early_cds_escape = sequence_delta->nmd_early_cds_fact ==
@@ -68,13 +83,6 @@ void duckvep_nmd_predict(
         reasons |= (uint8_t)DUCKVEP_NMD_ESCAPE_EARLY_CDS;
     }
 
-    exon_offset = transcripts->exon_offset[tx_idx];
-    exon_count = transcripts->exon_count[tx_idx];
-    if (exon_count == 0u || exon_offset > exons->exon_count ||
-        (size_t)exon_count > exons->exon_count - exon_offset) {
-        out->prediction = (uint8_t)DUCKVEP_NMD_UNRESOLVED;
-        return;
-    }
     if (exon_count == 1u) {
         reasons |= (uint8_t)DUCKVEP_NMD_ESCAPE_INTRONLESS;
     }
@@ -436,42 +444,48 @@ void duckvep_effect_ctx_apply_event(
     }
 }
 
+static uint64_t delta_pre_bits(const duckvep_sequence_delta_t *delta) {
+    if (delta == NULL || !delta->valid) return 0u;
+    uint64_t pre = DUCKVEP_PRE(DUCKVEP_PRE_DELTA);
+    if (delta->synonymous) pre |= DUCKVEP_PRE(DUCKVEP_PRE_SYNONYMOUS);
+    if (delta->missense) pre |= DUCKVEP_PRE(DUCKVEP_PRE_MISSENSE);
+    if (delta->stop_gained) pre |= DUCKVEP_PRE(DUCKVEP_PRE_STOP_GAINED);
+    if (delta->stop_lost) pre |= DUCKVEP_PRE(DUCKVEP_PRE_STOP_LOST);
+    if (delta->stop_retained) pre |= DUCKVEP_PRE(DUCKVEP_PRE_STOP_RETAINED);
+    if (delta->start_lost) pre |= DUCKVEP_PRE(DUCKVEP_PRE_START_LOST);
+    if (delta->start_retained) pre |= DUCKVEP_PRE(DUCKVEP_PRE_START_RETAINED);
+    if (delta->frameshift) pre |= DUCKVEP_PRE(DUCKVEP_PRE_FRAMESHIFT);
+    if (delta->inframe_deletion) pre |= DUCKVEP_PRE(DUCKVEP_PRE_INFRAME_DELETION);
+    if (delta->inframe_insertion) pre |= DUCKVEP_PRE(DUCKVEP_PRE_INFRAME_INSERTION);
+    if (delta->protein_altering) pre |= DUCKVEP_PRE(DUCKVEP_PRE_PROTEIN_ALTERING);
+    if (delta->coding_unknown) pre |= DUCKVEP_PRE(DUCKVEP_PRE_CODING_UNKNOWN);
+    if (delta->partial_codon) pre |= DUCKVEP_PRE(DUCKVEP_PRE_PARTIAL_CODON);
+    return pre;
+}
+
+uint64_t duckvep_effect_eval_coding_delta(const duckvep_sequence_delta_t *delta) {
+    uint64_t pre = delta_pre_bits(delta);
+    return pre ? duckvep_effect_eval(pre) : 0u;
+}
+
 void duckvep_effect_ctx_apply_delta(
     duckvep_effect_ctx_t           *ctx,
     const duckvep_sequence_delta_t *delta) {
 
-    if (ctx == NULL || delta == NULL || !delta->valid) return;
-    ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_DELTA);
-    if (delta->synonymous) ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_SYNONYMOUS);
-    if (delta->missense &&
-        (ctx->pre_bits &
-         (DUCKVEP_PRE(DUCKVEP_PRE_INSERTION) |
-          DUCKVEP_PRE(DUCKVEP_PRE_DELETION))) == 0u) {
-        ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_MISSENSE);
-    }
-    if (delta->stop_gained) ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_STOP_GAINED);
-    if (delta->stop_lost) ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_STOP_LOST);
-    if (delta->stop_retained) ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_STOP_RETAINED);
-    if (delta->start_lost) ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_START_LOST);
-    if (delta->start_retained) ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_START_RETAINED);
-    if (delta->frameshift &&
-        (ctx->pre_bits & DUCKVEP_PRE(DUCKVEP_PRE_SNP)) == 0u) {
-        ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_FRAMESHIFT);
-    }
-    if (delta->inframe_deletion &&
-        (ctx->pre_bits & DUCKVEP_PRE(DUCKVEP_PRE_DELETION)) != 0u) {
-        ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_INFRAME_DELETION);
-    }
-    if (delta->inframe_insertion &&
-        (ctx->pre_bits & DUCKVEP_PRE(DUCKVEP_PRE_INSERTION)) != 0u) {
-        ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_INFRAME_INSERTION);
-    }
-    if (delta->protein_altering)
-        ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_PROTEIN_ALTERING);
-    if (delta->coding_unknown)
-        ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_CODING_UNKNOWN);
-    if (delta->partial_codon)
-        ctx->pre_bits |= DUCKVEP_PRE(DUCKVEP_PRE_PARTIAL_CODON);
+    if (ctx == NULL) return;
+    uint64_t pre = delta_pre_bits(delta);
+    /* Independent events retain VEP's uploaded-feature class gates. Physical
+     * compound blocks have already resolved their edit/frame shape in delta;
+     * they must not inherit an arbitrary contributor's transport class. */
+    if (ctx->pre_bits & (DUCKVEP_PRE(DUCKVEP_PRE_INSERTION) | DUCKVEP_PRE(DUCKVEP_PRE_DELETION)))
+        pre &= ~DUCKVEP_PRE(DUCKVEP_PRE_MISSENSE);
+    if (ctx->pre_bits & DUCKVEP_PRE(DUCKVEP_PRE_SNP))
+        pre &= ~DUCKVEP_PRE(DUCKVEP_PRE_FRAMESHIFT);
+    if (!(ctx->pre_bits & DUCKVEP_PRE(DUCKVEP_PRE_DELETION)))
+        pre &= ~DUCKVEP_PRE(DUCKVEP_PRE_INFRAME_DELETION);
+    if (!(ctx->pre_bits & DUCKVEP_PRE(DUCKVEP_PRE_INSERTION)))
+        pre &= ~DUCKVEP_PRE(DUCKVEP_PRE_INFRAME_INSERTION);
+    ctx->pre_bits |= pre;
 }
 
 void duckvep_effect_ctx_apply_sv(

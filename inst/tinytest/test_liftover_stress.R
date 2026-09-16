@@ -13,28 +13,45 @@ test_liftover_stress <- function() {
   dst_fa <- file.path(tmp_dir, "liftover_dst.fa")
   chain_path <- file.path(tmp_dir, "liftover.chain")
 
-  writeLines(c(
-    ">chrF",
-    "ACGTACGTAA",
-    ">chrR",
-    "AACCGGTTAA"
-  ), src_fa)
-  writeLines(c(
-    ">chrLiftF",
-    "ACGTACGTAA",
-    ">chrLiftR",
-    "TTAACCGGTT"
-  ), dst_fa)
-  writeLines(c(
-    "chain 100 chrF 10 + 0 10 chrLiftF 10 + 0 10 1",
-    "10",
-    "",
-    "chain 100 chrR 10 + 0 10 chrLiftR 10 - 0 10 2",
-    "10"
-  ), chain_path)
+  writeLines(
+    c(
+      ">chrF",
+      "ACGTACGTAA",
+      ">chrR",
+      "AACCGGTTAA"
+    ),
+    src_fa
+  )
+  writeLines(
+    c(
+      ">chrLiftF",
+      "ACGTACGTAA",
+      ">chrLiftR",
+      "TTAACCGGTT"
+    ),
+    dst_fa
+  )
+  writeLines(
+    c(
+      "chain 100 chrF 10 + 0 10 chrLiftF 10 + 0 10 1",
+      "10",
+      "",
+      "chain 100 chrR 10 + 0 10 chrLiftR 10 - 0 10 2",
+      "10"
+    ),
+    chain_path
+  )
 
-  expect_true(rduckhts_fasta_index(con, src_fa, index_path = paste0(src_fa, ".fai"))$success[1])
-  expect_true(rduckhts_fasta_index(con, dst_fa, index_path = paste0(dst_fa, ".fai"))$success[1])
+  expect_true(rduckhts_fasta_index(
+    con,
+    src_fa,
+    index_path = paste0(src_fa, ".fai")
+  )$success[1])
+  expect_true(rduckhts_fasta_index(
+    con,
+    dst_fa,
+    index_path = paste0(dst_fa, ".fai")
+  )$success[1])
 
   expect_silent(dbExecute(
     con,
@@ -63,6 +80,28 @@ test_liftover_stress <- function() {
   expect_equal(sum(out$reverse_complemented), 500000)
   expect_equal(sum(out$dest_chrom == "chrLiftF"), 500000)
   expect_equal(sum(out$dest_chrom == "chrLiftR"), 500000)
+
+  nw_chain <- system.file("extdata", "liftover_nw_limit.chain", package = "Rduckhts")
+  nw_src <- system.file("extdata", "liftover_nw_limit_src.fa", package = "Rduckhts")
+  nw_dst <- system.file("extdata", "liftover_nw_limit_dst.fa", package = "Rduckhts")
+  expect_true(nzchar(nw_chain))
+  expect_true(nzchar(nw_src))
+  expect_true(nzchar(nw_dst))
+  expect_error(
+    DBI::dbGetQuery(
+      con,
+      paste0(
+        "SELECT bcftools_liftover('chrS', 2, substr(repeat('ACGT', 551), 2, 2200), 'C', ",
+        DBI::dbQuoteString(con, nw_chain), ", ",
+        DBI::dbQuoteString(con, nw_dst), ", ",
+        DBI::dbQuoteString(con, nw_src),
+        ", 1, 250, false, NULL::BIGINT, true)"
+      )
+    ),
+    pattern = "clip-pad alignment exceeds the 4194304-cell limit",
+    fixed = TRUE
+  )
+  expect_equal(DBI::dbGetQuery(con, "SELECT 42 AS answer")$answer, 42)
 }
 
 test_liftover_stress()

@@ -45,6 +45,8 @@ DUCKDB_EXTENSION_EXTERN
 #include <htslib/kstring.h>
 
 #include "include/hts_io_tuning.h"
+#include "include/duckdb_alloc.h"
+#include "include/region_list.h"
 #include "include/seq_encoding.h"
 #include "include/quality_encoding.h"
 
@@ -154,12 +156,7 @@ static void destroy_seq_bind(void *data) {
     if (b->index_path) duckdb_free(b->index_path);
     if (b->gzi_path) duckdb_free(b->gzi_path);
     if (b->region) duckdb_free(b->region);
-    if (b->regions) {
-        for (unsigned int i = 0; i < b->n_regions; i++) {
-            if (b->regions[i]) duckdb_free(b->regions[i]);
-        }
-        duckdb_free(b->regions);
-    }
+    free(b->regions); /* one region-list allocation, including strings */
     duckdb_free(b);
 }
 
@@ -239,14 +236,6 @@ static const char *strip_pair_suffix(const char *name, char *buf, size_t buf_cap
     return buf;
 }
 
-static char *strdup_duckdb(const char *s) {
-    if (!s) return NULL;
-    size_t len = strlen(s) + 1;
-    char *copy = (char *)duckdb_malloc(len);
-    if (copy) memcpy(copy, s, len);
-    return copy;
-}
-
 static char *default_fasta_index_path(const char *path) {
     size_t path_len;
     char *out;
@@ -258,45 +247,6 @@ static char *default_fasta_index_path(const char *path) {
     memcpy(out, path, path_len);
     memcpy(out + path_len, ".fai", 5);
     return out;
-}
-
-static void parse_regions_duckdb(const char *region_str, char ***out_regions, unsigned int *out_count) {
-    *out_regions = NULL;
-    *out_count = 0;
-    if (!region_str || region_str[0] == '\0') return;
-
-    unsigned int count = 1;
-    for (const char *p = region_str; *p; p++) if (*p == ',') count++;
-
-    char **arr = (char **)duckdb_malloc(sizeof(char *) * count);
-    char *dup = strdup_duckdb(region_str);
-    if (!arr || !dup) {
-        if (arr) duckdb_free(arr);
-        if (dup) duckdb_free(dup);
-        return;
-    }
-
-    unsigned int idx = 0;
-    char *tok = strtok(dup, ",");
-    while (tok && idx < count) {
-        while (*tok == ' ' || *tok == '\t') tok++;
-        size_t len = strlen(tok);
-        while (len > 0 && (tok[len - 1] == ' ' || tok[len - 1] == '\t')) tok[--len] = '\0';
-        if (len > 0) {
-            arr[idx] = strdup_duckdb(tok);
-            if (!arr[idx]) {
-                for (unsigned int i = 0; i < idx; i++) duckdb_free(arr[i]);
-                duckdb_free(arr);
-                duckdb_free(dup);
-                return;
-            }
-            idx++;
-        }
-        tok = strtok(NULL, ",");
-    }
-    duckdb_free(dup);
-    *out_regions = arr;
-    *out_count = idx;
 }
 
 static int seq_parse_scan_mode(const char *mode, int *scan_sequential) {
@@ -499,8 +449,12 @@ static void seq_read_bind(duckdb_bind_info info, int is_fastq) {
     }
     sam_close(fp);
 
-    seq_bind_data_t *bind = (seq_bind_data_t *)duckdb_malloc(sizeof(seq_bind_data_t));
-    memset(bind, 0, sizeof(seq_bind_data_t));
+    seq_bind_data_t *bind = duckhts_alloc_array(1, sizeof(*bind));
+    if (!bind) {
+        duckdb_bind_set_error(info, "FASTA/FASTQ: out of memory allocating bind state");
+        duckdb_free(file_path);
+        return;
+    }
     bind->file_path = file_path;
     bind->is_fastq = is_fastq;
     bind->direct_fastq = is_fastq && fmt == fastq_format;
@@ -547,9 +501,21 @@ static void seq_read_bind(duckdb_bind_info info, int is_fastq) {
         duckdb_value region_val = duckdb_bind_get_named_parameter(info, "region");
         if (region_val && !duckdb_is_null_value(region_val)) {
             bind->region = duckdb_get_varchar(region_val);
-            parse_regions_duckdb(bind->region, &bind->regions, &bind->n_regions);
+            if (!bind->region) {
+                duckdb_destroy_value(&region_val);
+                duckdb_bind_set_error(info, "region list: out of memory reading region");
+                destroy_seq_bind(bind);
+                return;
+            }
         }
         if (region_val) duckdb_destroy_value(&region_val);
+        char region_error[256];
+        if (!duckhts_region_list_parse(bind->region, &bind->regions, &bind->n_regions,
+                                       region_error, sizeof(region_error))) {
+            duckdb_bind_set_error(info, region_error);
+            destroy_seq_bind(bind);
+            return;
+        }
 
         if (bind->scan_sequential && bind->region && bind->region[0] != '\0') {
             duckdb_bind_set_error(info, "read_fasta: scan_mode := 'sequential' is incompatible with region queries");
@@ -695,13 +661,21 @@ static void fastq_read_bind(duckdb_bind_info info) { seq_read_bind(info, 1); }
 static void seq_read_init(duckdb_init_info info) {
     seq_bind_data_t *bind = (seq_bind_data_t *)duckdb_init_get_bind_data(info);
 
-    seq_init_data_t *init = (seq_init_data_t *)duckdb_malloc(sizeof(seq_init_data_t));
-    memset(init, 0, sizeof(seq_init_data_t));
+    seq_init_data_t *init = duckhts_alloc_array(1, sizeof(*init));
+    if (!init) {
+        duckdb_init_set_error(info, "FASTA/FASTQ: out of memory allocating worker state");
+        return;
+    }
 
     /* Projection pushdown: record which columns DuckDB actually needs */
     init->column_count = duckdb_init_get_column_count(info);
     if (init->column_count > 0) {
-        init->column_ids = (idx_t *)duckdb_malloc(sizeof(idx_t) * init->column_count);
+        init->column_ids = duckhts_alloc_array(init->column_count, sizeof(*init->column_ids));
+        if (!init->column_ids) {
+            duckdb_init_set_error(info, "FASTA/FASTQ: out of memory allocating projected columns");
+            destroy_seq_init(init);
+            return;
+        }
         for (idx_t i = 0; i < init->column_count; i++)
             init->column_ids[i] = duckdb_init_get_column_index(info, i);
     }
@@ -824,6 +798,11 @@ static void seq_read_init(duckdb_init_info info) {
     }
 
     init->rec = bam_init1();
+    if (!init->rec) {
+        duckdb_init_set_error(info, "FASTA/FASTQ: out of memory allocating sequence record");
+        destroy_seq_init(init);
+        return;
+    }
 
     if (bind->paired) {
         init->fp_mate = sam_open(bind->mate_path, "r");
@@ -841,6 +820,11 @@ static void seq_read_init(duckdb_init_info info) {
             return;
         }
         init->rec_mate = bam_init1();
+        if (!init->rec_mate) {
+            duckdb_init_set_error(info, "read_fastq: out of memory allocating mate record");
+            destroy_seq_init(init);
+            return;
+        }
     }
 
     if (!bind->is_fastq && bind->n_regions > 0) {
@@ -1186,26 +1170,26 @@ static void seq_read_function(duckdb_function_info info, duckdb_data_chunk outpu
                 return;
             }
 
-            const char *name = region;
-            size_t name_len = strlen(region);
-            const char *colon = strchr(region, ':');
-            if (colon) name_len = (size_t)(colon - region);
-            if (ensure_buf(&init->pair_buf, &init->pair_buf_cap,
-                           name_len) != 0) {
-                free(seq);
-                duckdb_function_set_error(info, "read_fasta: out of memory allocating name buffer");
-                init->done = 1;
-                duckdb_data_chunk_set_size(output, 0);
-                return;
-            }
-            memcpy(init->pair_buf, name, name_len);
-            init->pair_buf[name_len] = '\0';
-
             for (idx_t i = 0; i < init->column_count; i++) {
                 idx_t col_id = init->column_ids[i];
                 duckdb_vector vec = duckdb_data_chunk_get_vector(output, i);
                 if (col_id == SEQ_COL_NAME) {
-                    duckdb_vector_assign_string_element(vec, row_count, init->pair_buf);
+                    /* Use the same parser/index as fai_fetch64, not a second
+                     * interpretation of quoted or colon-containing names. */
+                    int tid;
+                    hts_pos_t beg, end;
+                    const char *name = NULL;
+                    if (fai_parse_region(init->fai, region, &tid, &beg, &end, 0)) {
+                        name = faidx_iseq(init->fai, tid); /* borrowed from this reader */
+                    }
+                    if (!name) {
+                        free(seq);
+                        duckdb_function_set_error(info, "read_fasta: failed to resolve region header name");
+                        init->done = 1;
+                        duckdb_data_chunk_set_size(output, 0);
+                        return;
+                    }
+                    duckdb_vector_assign_string_element(vec, row_count, name);
                 } else if (col_id == SEQ_COL_DESCRIPTION) {
                     set_null(vec, row_count);
                 } else if (col_id == SEQ_COL_SEQUENCE) {

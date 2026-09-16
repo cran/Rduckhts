@@ -3,23 +3,55 @@ library(DBI)
 
 test_bcf_string_format_lists <- function() {
   con <- rduckhts_connect()
-  on.exit({
-    dbDisconnect(con, shutdown = TRUE)
-  }, add = TRUE)
+  on.exit(
+    {
+      dbDisconnect(con, shutdown = TRUE)
+    },
+    add = TRUE
+  )
 
-  bcf_path <- system.file("extdata", "format_string_list.vcf", package = "Rduckhts")
-  fixed_path <- system.file("extdata", "fixed_count_arrays.vcf", package = "Rduckhts")
-  mapping_path <- system.file("extdata", "mapping_number_families.vcf", package = "Rduckhts")
+  bcf_path <- system.file(
+    "extdata",
+    "format_string_list.vcf",
+    package = "Rduckhts"
+  )
+  fixed_path <- system.file(
+    "extdata",
+    "fixed_count_arrays.vcf",
+    package = "Rduckhts"
+  )
+  mapping_path <- system.file(
+    "extdata",
+    "mapping_number_families.vcf",
+    package = "Rduckhts"
+  )
   vep_path <- system.file("extdata", "test_vep.vcf", package = "Rduckhts")
   expect_true(file.exists(bcf_path))
   expect_true(file.exists(fixed_path))
   expect_true(file.exists(mapping_path))
   expect_true(file.exists(vep_path))
 
-  expect_silent(rduckhts_bcf(con, "bcf_string_lists", bcf_path, decompression_threads = 0, overwrite = TRUE))
-  expect_silent(rduckhts_bcf(con, "bcf_fixed_counts", fixed_path, overwrite = TRUE))
+  expect_silent(rduckhts_bcf(
+    con,
+    "bcf_string_lists",
+    bcf_path,
+    decompression_threads = 0,
+    overwrite = TRUE
+  ))
+  expect_silent(rduckhts_bcf(
+    con,
+    "bcf_fixed_counts",
+    fixed_path,
+    overwrite = TRUE
+  ))
   expect_error(
-    rduckhts_bcf(con, "bcf_bad_threads", bcf_path, decompression_threads = -1, overwrite = TRUE),
+    rduckhts_bcf(
+      con,
+      "bcf_bad_threads",
+      bcf_path,
+      decompression_threads = -1,
+      overwrite = TRUE
+    ),
     pattern = "decompression_threads must be a single whole number"
   )
   expect_error(
@@ -79,84 +111,37 @@ test_bcf_string_format_lists <- function() {
   expect_equal(fixed_row$info_sb[1], "[10, 20, 30, 40]")
   expect_equal(fixed_row$format_hq[1], "[5, 9]")
 
-  quoted_bcf <- DBI::dbQuoteString(con, bcf_path)
-  quoted_fixed <- DBI::dbQuoteString(con, fixed_path)
   quoted_mapping <- DBI::dbQuoteString(con, mapping_path)
 
-  v2_type_row <- DBI::dbGetQuery(
-    con,
-    sprintf("SELECT typeof(FORMAT_LAA_SAMPLE1) AS t FROM read_bcf_v2(%s) LIMIT 1", quoted_bcf)
-  )
-  expect_equal(v2_type_row$t[1], "VARCHAR[]")
-
-  v2_missing_row <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste(
-        "SELECT FORMAT_LAA_SAMPLE1 IS NULL AS is_null,",
-        "FORMAT_LAA_SAMPLE1::VARCHAR AS laa",
-        "FROM read_bcf_v2(%s) WHERE POS = 263"
-      ),
-      quoted_bcf
-    )
-  )
-  expect_true(isTRUE(v2_missing_row$is_null[1]))
-  expect_true(is.na(v2_missing_row$laa[1]))
-
-  v2_fixed_row <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste(
-        "SELECT INFO_SB::VARCHAR AS info_sb,",
-        "FORMAT_HQ_S1::VARCHAR AS format_hq",
-        "FROM read_bcf_v2(%s) WHERE POS = 100"
-      ),
-      quoted_fixed
-    )
-  )
-  expect_equal(v2_fixed_row$info_sb[1], "[10, 20, 30, 40]")
-  expect_equal(v2_fixed_row$format_hq[1], "[5, 9]")
-
-  v2_number_dot_row <- DBI::dbGetQuery(
+  number_dot_row <- DBI::dbGetQuery(
     con,
     sprintf(
       paste(
         "SELECT typeof(INFO_VSTR) AS info_vstr_type, INFO_VSTR::VARCHAR AS info_vstr,",
         "typeof(INFO_VINT) AS info_vint_type, INFO_VINT::VARCHAR AS info_vint,",
         "typeof(FORMAT_LAA_S1) AS fmt_laa_type, FORMAT_LAA_S1::VARCHAR AS fmt_laa",
-        "FROM read_bcf_v2(%s) WHERE POS = 200"
+        "FROM read_bcf(%s) WHERE POS = 200"
       ),
       quoted_mapping
     )
   )
-  expect_equal(v2_number_dot_row$info_vstr_type[1], "VARCHAR[]")
-  expect_equal(v2_number_dot_row$info_vstr[1], "[red, blue, green]")
-  expect_equal(v2_number_dot_row$info_vint_type[1], "INTEGER[]")
-  expect_equal(v2_number_dot_row$info_vint[1], "[1, 2, 3]")
-  expect_equal(v2_number_dot_row$fmt_laa_type[1], "VARCHAR[]")
-  expect_equal(v2_number_dot_row$fmt_laa[1], "[1, 2]")
+  expect_equal(number_dot_row$info_vstr_type[1], "VARCHAR[]")
+  expect_equal(number_dot_row$info_vstr[1], "[red, blue, green]")
+  expect_equal(number_dot_row$info_vint_type[1], "INTEGER[]")
+  expect_equal(number_dot_row$info_vint[1], "[1, 2, 3]")
+  expect_equal(number_dot_row$fmt_laa_type[1], "VARCHAR[]")
+  expect_equal(number_dot_row$fmt_laa[1], "[1, 2]")
 
-  mapping_mismatch <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "WITH ",
-        "v1 AS (SELECT * FROM read_bcf(%s)), ",
-        "v2 AS (SELECT * FROM read_bcf_v2(%s)) ",
-        "SELECT count(*) AS n FROM ((SELECT * FROM v1 EXCEPT ALL SELECT * FROM v2) ",
-        "UNION ALL (SELECT * FROM v2 EXCEPT ALL SELECT * FROM v1))"
-      ),
-      quoted_mapping, quoted_mapping
-    )
-  )
-  expect_equal(mapping_mismatch$n[1], 0)
 }
 
-test_bcf_v2_sql <- function() {
+test_bcf_projection_sql <- function() {
   con <- rduckhts_connect()
-  on.exit({
-    dbDisconnect(con, shutdown = TRUE)
-  }, add = TRUE)
+  on.exit(
+    {
+      dbDisconnect(con, shutdown = TRUE)
+    },
+    add = TRUE
+  )
   bcf_path <- system.file("extdata", "formatcols.vcf.gz", package = "Rduckhts")
   expect_true(file.exists(bcf_path))
   quoted_path <- DBI::dbQuoteString(con, bcf_path)
@@ -167,7 +152,7 @@ test_bcf_v2_sql <- function() {
       paste0(
         "SELECT count(*) AS n, min(POS) AS min_pos, max(POS) AS max_pos, ",
         "min(FORMAT_S) AS fmt_s ",
-        "FROM read_bcf_v2(%s, tidy_format := true)"
+        "FROM read_bcf(%s, tidy_format := true)"
       ),
       quoted_path
     )
@@ -177,193 +162,44 @@ test_bcf_v2_sql <- function() {
   expect_equal(out$max_pos[1], 100)
   expect_equal(out$fmt_s[1], "a")
 
-  schema_mismatch <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "WITH ",
-        "v1 AS (SELECT row_number() OVER () AS ord, column_name, column_type ",
-        "       FROM (DESCRIBE SELECT * FROM read_bcf(%s))), ",
-        "v2 AS (SELECT row_number() OVER () AS ord, column_name, column_type ",
-        "       FROM (DESCRIBE SELECT * FROM read_bcf_v2(%s))) ",
-        "SELECT count(*) AS n FROM ((SELECT * FROM v1 EXCEPT ALL SELECT * FROM v2) ",
-        "UNION ALL (SELECT * FROM v2 EXCEPT ALL SELECT * FROM v1))"
-      ),
-      quoted_path, quoted_path
-    )
+  expect_equal(dbGetQuery(con, paste(
+    "SELECT count(*) AS n FROM duckdb_functions()",
+    "WHERE function_name = 'read_bcf_v2'"
+  ))$n[[1]], 0)
+
+  vep_tidy_path <- system.file(
+    "extdata",
+    "test_vep_tidy.vcf",
+    package = "Rduckhts"
   )
-  expect_equal(schema_mismatch$n[1], 0)
-
-  fixed_path <- system.file("extdata", "fixed_count_arrays.vcf", package = "Rduckhts")
-  expect_true(file.exists(fixed_path))
-  quoted_fixed <- DBI::dbQuoteString(con, fixed_path)
-
-  default_mismatch <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "WITH ",
-        "v1 AS (SELECT * FROM read_bcf(%s)), ",
-        "v2 AS (SELECT * FROM read_bcf_v2(%s)) ",
-        "SELECT count(*) AS n FROM ((SELECT * FROM v1 EXCEPT ALL SELECT * FROM v2) ",
-        "UNION ALL (SELECT * FROM v2 EXCEPT ALL SELECT * FROM v1))"
-      ),
-      quoted_fixed, quoted_fixed
-    )
-  )
-  expect_equal(default_mismatch$n[1], 0)
-
-  tidy_mismatch <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "WITH ",
-        "v1 AS (SELECT * FROM read_bcf(%s, tidy_format := true)), ",
-        "v2 AS (SELECT * FROM read_bcf_v2(%s, tidy_format := true)) ",
-        "SELECT count(*) AS n FROM ((SELECT * FROM v1 EXCEPT ALL SELECT * FROM v2) ",
-        "UNION ALL (SELECT * FROM v2 EXCEPT ALL SELECT * FROM v1))"
-      ),
-      quoted_fixed, quoted_fixed
-    )
-  )
-  expect_equal(tidy_mismatch$n[1], 0)
-
-  vep_tidy_path <- system.file("extdata", "test_vep_tidy.vcf", package = "Rduckhts")
   expect_true(file.exists(vep_tidy_path))
   quoted_vep_tidy <- DBI::dbQuoteString(con, vep_tidy_path)
-  v2_vep_tidy <- DBI::dbGetQuery(
+  vep_tidy <- DBI::dbGetQuery(
     con,
     sprintf(
       paste(
         "SELECT SAMPLE_ID, VEP_SYMBOL::VARCHAR AS symbol,",
         "VEP_DISTANCE::VARCHAR AS distance, FORMAT_GT",
-        "FROM read_bcf_v2(%s, tidy_format := true)",
+        "FROM read_bcf(%s, tidy_format := true)",
         "ORDER BY SAMPLE_ID"
       ),
       quoted_vep_tidy
     )
   )
-  expect_equal(v2_vep_tidy$SAMPLE_ID, c("S1", "S2"))
-  expect_equal(v2_vep_tidy$symbol, c("[GENE1]", "[GENE1]"))
-  expect_equal(v2_vep_tidy$distance, c("[12]", "[12]"))
-  expect_equal(v2_vep_tidy$FORMAT_GT, c("0/1", "1/1"))
-
-  samples_file <- system.file("extdata", "samples_s1.txt", package = "Rduckhts")
-  expect_true(file.exists(samples_file))
-  quoted_samples_file <- DBI::dbQuoteString(con, samples_file)
-
-  sample_schema <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "SELECT count(*) AS n FROM ",
-        "(DESCRIBE SELECT * FROM read_bcf_v2(%s, samples := 'S1')) ",
-        "WHERE column_name = 'FORMAT_GT_S2'"
-      ),
-      quoted_fixed
-    )
-  )
-  expect_equal(sample_schema$n[1], 0)
-
-  sample_pushdown <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste(
-        "SELECT count(*) AS n, count(DISTINCT SAMPLE_ID) AS samples,",
-        "string_agg(FORMAT_GT, ',' ORDER BY POS) AS gt",
-        "FROM read_bcf_v2(%s, samples_file := %s, tidy_format := true)"
-      ),
-      quoted_fixed, quoted_samples_file
-    )
-  )
-  expect_equal(sample_pushdown$n[1], 2)
-  expect_equal(sample_pushdown$samples[1], 1)
-  expect_equal(sample_pushdown$gt[1], "0/1,0/0")
+  expect_equal(vep_tidy$SAMPLE_ID, c("S1", "S2"))
+  expect_equal(vep_tidy$symbol, c("[GENE1]", "[GENE1]"))
+  expect_equal(vep_tidy$distance, c("[12]", "[12]"))
+  expect_equal(vep_tidy$FORMAT_GT, c("0/1", "1/1"))
 
   indexed_bcf_path <- system.file("extdata", "vcf_file.bcf", package = "Rduckhts")
-  expect_true(file.exists(indexed_bcf_path))
   quoted_indexed_bcf <- DBI::dbQuoteString(con, indexed_bcf_path)
-  zero_sample_tidy <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "SELECT ",
-        "(SELECT count(*) FROM read_bcf_v2(%s, tidy_format := true, exclude_samples := 'A,B')) AS count_only, ",
-        "(SELECT count(CHROM) FROM read_bcf_v2(%s, tidy_format := true, exclude_samples := 'A,B')) AS materialized, ",
-        "(SELECT count(*) FROM (DESCRIBE SELECT * FROM read_bcf_v2(%s, tidy_format := true, exclude_samples := 'A,B')) ",
-        " WHERE column_name = 'SAMPLE_ID') AS sample_id_cols"
-      ),
-      quoted_indexed_bcf, quoted_indexed_bcf, quoted_indexed_bcf
-    )
-  )
-  expect_equal(zero_sample_tidy$count_only[1], zero_sample_tidy$materialized[1])
-  expect_equal(zero_sample_tidy$sample_id_cols[1], 0)
-
-  minimal_schema <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "SELECT count(*) AS n, string_agg(column_name, ',' ORDER BY column_name) AS cols ",
-        "FROM (DESCRIBE SELECT * FROM read_bcf_v2(%s, ",
-        "include_info := false, include_format := false, include_vep := false))"
-      ),
-      quoted_fixed
-    )
-  )
-  expect_equal(minimal_schema$n[1], 7)
-  expect_equal(minimal_schema$cols[1], "ALT,CHROM,FILTER,ID,POS,QUAL,REF")
-
-  filtered_schema <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "SELECT string_agg(column_name, ',' ORDER BY column_name) AS cols ",
-        "FROM (DESCRIBE SELECT * FROM read_bcf_v2(%s, info_fields := 'SB', format_fields := 'GT'))"
-      ),
-      quoted_fixed
-    )
-  )
-  expect_equal(
-    filtered_schema$cols[1],
-    "ALT,CHROM,FILTER,FORMAT_GT_S1,FORMAT_GT_S2,ID,INFO_SB,POS,QUAL,REF"
-  )
-
-  filtered_rows <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "SELECT count(*) AS n, sum(list_count(INFO_SB)) AS sb, ",
-        "sum(length(coalesce(FORMAT_GT_S1, '')) + length(coalesce(FORMAT_GT_S2, ''))) AS gt_len ",
-        "FROM read_bcf_v2(%s, info_fields := 'SB', format_fields := 'GT')"
-      ),
-      quoted_fixed
-    )
-  )
-  expect_equal(filtered_rows$n[1], 2)
-  expect_equal(filtered_rows$sb[1], 4)
-  expect_equal(filtered_rows$gt_len[1], 12)
-
-  gt_projection_mismatch <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "WITH ",
-        "v1 AS (SELECT POS, SAMPLE_ID, FORMAT_GT FROM read_bcf(%s, tidy_format := true)), ",
-        "v2 AS (SELECT POS, SAMPLE_ID, FORMAT_GT FROM read_bcf_v2(%s, tidy_format := true, format_fields := 'GT')) ",
-        "SELECT count(*) AS n FROM ((SELECT * FROM v1 EXCEPT ALL SELECT * FROM v2) ",
-        "UNION ALL (SELECT * FROM v2 EXCEPT ALL SELECT * FROM v1))"
-      ),
-      quoted_indexed_bcf, quoted_indexed_bcf
-    )
-  )
-  expect_equal(gt_projection_mismatch$n[1], 0)
 
   gt_edge_cases <- DBI::dbGetQuery(
     con,
     sprintf(
       paste0(
         "SELECT string_agg(FORMAT_GT, ',' ORDER BY POS, SAMPLE_ID) AS gt ",
-        "FROM read_bcf_v2(%s, tidy_format := true, format_fields := 'GT') ",
+        "FROM read_bcf(%s, tidy_format := true) ",
         "WHERE FORMAT_GT IN ('2', '0/300', '240/260')"
       ),
       quoted_indexed_bcf
@@ -371,45 +207,40 @@ test_bcf_v2_sql <- function() {
   )
   expect_equal(gt_edge_cases$gt[1], "2,0/300,240/260")
 
-  ploidy_edge_path <- system.file("extdata", "genotype_ploidy_edge_cases.vcf", package = "Rduckhts")
+  ploidy_edge_path <- system.file(
+    "extdata",
+    "genotype_ploidy_edge_cases.vcf",
+    package = "Rduckhts"
+  )
   expect_true(file.exists(ploidy_edge_path))
   ploidy_edges <- DBI::dbGetQuery(
     con,
     sprintf(
       paste0(
         "SELECT string_agg(SAMPLE_ID || '=' || FORMAT_GT, ',' ORDER BY SAMPLE_ID) AS gt ",
-        "FROM read_bcf_v2(%s, tidy_format := true, format_fields := 'GT')"
+        "FROM read_bcf(%s, tidy_format := true)"
       ),
       DBI::dbQuoteString(con, ploidy_edge_path)
     )
   )
-  expect_equal(ploidy_edges$gt[1], "BIG=0/10,DIP=0|1,HAP=1,TET=0/1/2/3,TRI=0/1/2")
+  expect_equal(
+    ploidy_edges$gt[1],
+    "BIG=0/10,DIP=0|1,HAP=1,TET=0/1/2/3,TRI=0/1/2"
+  )
 
-  phased_fields_path <- system.file("extdata", "phased_genotype_fields.vcf", package = "Rduckhts")
+  phased_fields_path <- system.file(
+    "extdata",
+    "phased_genotype_fields.vcf",
+    package = "Rduckhts"
+  )
   expect_true(file.exists(phased_fields_path))
   quoted_phased <- DBI::dbQuoteString(con, phased_fields_path)
-  phased_mismatch <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "WITH ",
-        "v1 AS (SELECT POS, SAMPLE_ID, FORMAT_GT, FORMAT_PL, FORMAT_GP, FORMAT_DS, FORMAT_PS ",
-        "       FROM read_bcf(%s, tidy_format := true)), ",
-        "v2 AS (SELECT POS, SAMPLE_ID, FORMAT_GT, FORMAT_PL, FORMAT_GP, FORMAT_DS, FORMAT_PS ",
-        "       FROM read_bcf_v2(%s, tidy_format := true, format_fields := 'GT,PL,GP,DS,PS')) ",
-        "SELECT count(*) AS n FROM ((SELECT * FROM v1 EXCEPT ALL SELECT * FROM v2) ",
-        "UNION ALL (SELECT * FROM v2 EXCEPT ALL SELECT * FROM v1))"
-      ),
-      quoted_phased, quoted_phased
-    )
-  )
-  expect_equal(phased_mismatch$n[1], 0)
   phased_gt <- DBI::dbGetQuery(
     con,
     sprintf(
       paste0(
         "SELECT string_agg(SAMPLE_ID || '=' || FORMAT_GT || ':PS=' || coalesce(CAST(FORMAT_PS AS VARCHAR), 'NA'), ',' ORDER BY POS, SAMPLE_ID) AS gt ",
-        "FROM read_bcf_v2(%s, tidy_format := true, format_fields := 'GT,PL,GP,DS,PS')"
+        "FROM read_bcf(%s, tidy_format := true)"
       ),
       quoted_phased
     )
@@ -427,7 +258,7 @@ test_bcf_v2_sql <- function() {
     sprintf(
       paste0(
         "SELECT string_agg(SAMPLE_ID || '=' || FORMAT_GT || ':PL=' || length(FORMAT_PL) || ':GP=' || length(FORMAT_GP) || ':DS=' || length(FORMAT_DS), ',' ORDER BY POS, SAMPLE_ID) AS lengths ",
-        "FROM read_bcf_v2(%s, tidy_format := true, format_fields := 'GT,PL,GP,DS,PS') ",
+        "FROM read_bcf(%s, tidy_format := true) ",
         "WHERE POS >= 30"
       ),
       quoted_phased
@@ -438,7 +269,11 @@ test_bcf_v2_sql <- function() {
     "S1=1:PL=2:GP=2:DS=1,S2=0|1|1:PL=4:GP=4:DS=1,S1=0|1|1|2:PL=15:GP=15:DS=2,S2=2|2:PL=6:GP=6:DS=2"
   )
 
-  tidy_chunk_path <- system.file("extdata", "tidy_chunk_boundary.vcf", package = "Rduckhts")
+  tidy_chunk_path <- system.file(
+    "extdata",
+    "tidy_chunk_boundary.vcf",
+    package = "Rduckhts"
+  )
   expect_true(file.exists(tidy_chunk_path))
   tidy_chunk <- DBI::dbGetQuery(
     con,
@@ -446,7 +281,7 @@ test_bcf_v2_sql <- function() {
       paste0(
         "WITH t AS (",
         "SELECT SAMPLE_ID, FORMAT_GT ",
-        "FROM read_bcf_v2(%s, tidy_format := true, format_fields := 'GT')",
+        "FROM read_bcf(%s, tidy_format := true)",
         ") ",
         "SELECT ",
         "(SELECT count(*) FROM t) AS n, ",
@@ -461,28 +296,6 @@ test_bcf_v2_sql <- function() {
   expect_equal(tidy_chunk$samples[1], 2053)
   expect_equal(tidy_chunk$edge_gt[1], "S0001=0/1,S2048=0/1,S2049=0/1,S2053=0/1")
 
-  no_format_tidy <- DBI::dbGetQuery(
-    con,
-    sprintf("SELECT count(*) AS n FROM read_bcf_v2(%s, tidy_format := true, include_format := false)", quoted_fixed)
-  )
-  expect_equal(no_format_tidy$n[1], 2)
-
-  vep_path <- system.file("extdata", "test_vep.vcf", package = "Rduckhts")
-  expect_true(file.exists(vep_path))
-  quoted_vep <- DBI::dbQuoteString(con, vep_path)
-  vep_schema <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "SELECT string_agg(column_name, ',' ORDER BY column_name) AS cols ",
-        "FROM (DESCRIBE SELECT * FROM read_bcf_v2(%s, ",
-        "include_info := false, include_format := false, vep_fields := 'Consequence,DISTANCE'))"
-      ),
-      quoted_vep
-    )
-  )
-  expect_equal(vep_schema$cols[1], "ALT,CHROM,FILTER,ID,POS,QUAL,REF,VEP_Consequence,VEP_DISTANCE")
-
   ensembl_path <- system.file(
     "extdata",
     "ensembl_release_consequences.vcf",
@@ -496,8 +309,7 @@ test_bcf_v2_sql <- function() {
         "SELECT count(*) AS records, ",
         "sum(list_count(VEP_Consequence)) AS csq_entries, ",
         "sum(list_count(INFO_VE)) AS ve_entries ",
-        "FROM read_bcf_v2(%s, info_fields := 'VE', include_format := false, ",
-        "vep_fields := 'Allele,Consequence,Feature_type,Feature,Amino_acids,SIFT')"
+        "FROM read_bcf(%s)"
       ),
       DBI::dbQuoteString(con, ensembl_path)
     )
@@ -506,165 +318,243 @@ test_bcf_v2_sql <- function() {
   expect_equal(ensembl_counts$csq_entries[1], 6)
   expect_equal(ensembl_counts$ve_entries[1], 9)
 
-  expect_error(
-    DBI::dbGetQuery(
-      con,
-      sprintf("SELECT count(*) FROM read_bcf_v2(%s, info_fields := 'NOPE')", quoted_fixed)
-    ),
-    pattern = "unknown field"
-  )
-
-  score_gwas_path <- system.file("extdata", "score_gwas_summary.vcf", package = "Rduckhts")
-  expect_true(file.exists(score_gwas_path))
-  expect_error(
-    DBI::dbGetQuery(
-      con,
-      sprintf(
-        "SELECT count(*) FROM read_bcf_v2(%s, format_fields := 'GT')",
-        DBI::dbQuoteString(con, score_gwas_path)
-      )
-    ),
-    pattern = "unknown field"
-  )
-
-  expect_error(
-    DBI::dbGetQuery(
-      con,
-      sprintf("SELECT count(*) FROM read_bcf_v2(%s, format_fields := 'GT')", quoted_vep)
-    ),
-    pattern = "no samples"
-  )
-
-  expect_error(
-    DBI::dbGetQuery(
-      con,
-      sprintf(
-        "SELECT count(*) FROM read_bcf_v2(%s, exclude_samples := 'S1,S2', format_fields := 'GT')",
-        quoted_fixed
-      )
-    ),
-    pattern = "no samples"
-  )
-
-  expect_error(
-    DBI::dbGetQuery(
-      con,
-      sprintf("SELECT count(*) FROM read_bcf_v2(%s, samples := 'NOPE')", quoted_fixed)
-    ),
-    pattern = "unknown sample"
-  )
 }
 
-test_bcf_appender <- function() {
+test_bcf_materialization <- function() {
   con <- rduckhts_connect()
-  on.exit({
-    dbDisconnect(con, shutdown = TRUE)
-  }, add = TRUE)
-  bcf_path <- system.file("extdata", "vcf_file.bcf", package = "Rduckhts")
-  expect_true(file.exists(bcf_path))
-
-  quoted_path <- DBI::dbQuoteString(con, bcf_path)
-  out <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "SELECT rows_written FROM read_bcf_appender(",
-        "%s, 'bcf_appender_test', ",
-        "region := '1:3000150-3000151', tidy_format := true, overwrite := true)"
-      ),
-      quoted_path
-    )
-  )
-  expect_equal(out$rows_written[1], 4)
-
-  schema <- DBI::dbGetQuery(con, "PRAGMA table_info('bcf_appender_test')")
-  expect_false("FILE_OFFSET" %in% schema$name)
-
-  counts <- DBI::dbGetQuery(
-    con,
-    "SELECT count(*) AS n, count(DISTINCT SAMPLE_ID) AS samples FROM bcf_appender_test"
-  )
-  expect_equal(counts$n[1], 4)
-  expect_equal(counts$samples[1], 2)
-
-  out_offset <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "SELECT rows_written FROM read_bcf_appender(",
-        "%s, 'bcf_appender_offset_test', ",
-        "region := '1:3000150-3000151', tidy_format := true, ",
-        "overwrite := true, include_file_offset := true)"
-      ),
-      quoted_path
-    )
-  )
-  expect_equal(out_offset$rows_written[1], 4)
-
-  offset_counts <- DBI::dbGetQuery(
-    con,
-    paste0(
-      "SELECT count(*) AS n, count(DISTINCT SAMPLE_ID) AS samples, ",
-      "count(DISTINCT FILE_OFFSET) AS offsets FROM bcf_appender_offset_test"
-    )
-  )
-  expect_equal(offset_counts$n[1], 4)
-  expect_equal(offset_counts$samples[1], 2)
-  expect_equal(offset_counts$offsets[1], 2)
-
-  region_spec <- paste0(
-    "1:3062915-3062915,1:3062918-3062918,",
-    "1:3062915-3062915,2:3199812-3199812"
-  )
-  out_serial_regions <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "SELECT rows_written FROM read_bcf_appender(",
-        "%s, 'bcf_appender_serial_regions_test', ",
-        "region := %s, tidy_format := true, overwrite := true, ",
-        "include_file_offset := true, region_threads := 1)"
-      ),
-      quoted_path,
-      DBI::dbQuoteString(con, region_spec)
-    )
-  )
-  expect_equal(out_serial_regions$rows_written[1], 6)
-
-  out_parallel <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      paste0(
-        "SELECT rows_written FROM read_bcf_appender(",
-        "%s, 'bcf_appender_parallel_regions_test', ",
-        "region := %s, tidy_format := true, overwrite := true, ",
-        "include_file_offset := true, region_threads := 2)"
-      ),
-      quoted_path,
-      DBI::dbQuoteString(con, region_spec)
-    )
-  )
-  expect_equal(out_parallel$rows_written[1], 6)
-
-  parallel_schema <- DBI::dbGetQuery(
-    con,
-    "PRAGMA table_info('bcf_appender_parallel_regions_test')"
-  )
-  expect_false("duckhts_region_idx" %in% parallel_schema$name)
-
-  delta <- DBI::dbGetQuery(
-    con,
-    paste0(
-      "SELECT count(*) AS n FROM (",
-      "(SELECT * FROM bcf_appender_serial_regions_test EXCEPT ALL ",
-      " SELECT * FROM bcf_appender_parallel_regions_test) UNION ALL ",
-      "(SELECT * FROM bcf_appender_parallel_regions_test EXCEPT ALL ",
-      " SELECT * FROM bcf_appender_serial_regions_test))"
-    )
-  )
-  expect_equal(delta$n[1], 0)
+  on.exit(dbDisconnect(con, shutdown = TRUE))
+  path <- system.file("extdata", "vcf_file.bcf", package = "Rduckhts")
+  quoted <- dbQuoteString(con, path)
+  expect_equal(dbGetQuery(con, paste(
+    "SELECT count(*) AS n FROM duckdb_functions()",
+    "WHERE function_name IN ('read_bcf_v2','read_bcf_appender')"))$n[[1]], 0)
+  dbExecute(con, sprintf(paste(
+    "CREATE TABLE bcf_materialized AS SELECT * FROM read_bcf(%s,",
+    "region := '1:3062915-3062915,1:3062918-3062918,1:3062915-3062915,2:3199812-3199812',",
+    "tidy_format := true)"), quoted))
+  actual <- dbGetQuery(con, "SELECT * FROM bcf_materialized ORDER BY CHROM,POS,SAMPLE_ID")
+  expected <- dbGetQuery(con, sprintf(paste(
+    "SELECT * FROM read_bcf(%s, scan_mode := 'sequential', tidy_format := true)",
+    "WHERE (CHROM='1' AND POS IN (3062915,3062918)) OR (CHROM='2' AND POS=3199812)",
+    "ORDER BY CHROM,POS,SAMPLE_ID"), quoted))
+  expect_equal(nrow(actual), 6L)
+  expect_equal(actual, expected)
+  dbExecute(con, sprintf(paste(
+    "CREATE OR REPLACE TABLE bcf_materialized AS SELECT * FROM read_bcf(%s,",
+    "region := 'absent_contig:1-1000', tidy_format := true)"), quoted))
+  expect_equal(dbGetQuery(con, "SELECT count(*) AS n FROM bcf_materialized")$n[[1]], 0)
 }
 
+test_bcf_record_cache <- function() {
+  con <- rduckhts_connect()
+  on.exit(dbDisconnect(con, shutdown = TRUE))
+  path <- system.file("extdata", "bcf_cache_lifecycle.vcf", package = "Rduckhts")
+  expect_true(file.exists(path))
+  out <- dbGetQuery(con, sprintf(paste(
+    "SELECT POS, SAMPLE_ID, VEP_SYMBOL::VARCHAR AS symbol, INFO_DP,",
+    "FORMAT_GT, FORMAT_AD::VARCHAR AS ad, FORMAT_ST::VARCHAR AS st",
+    "FROM read_bcf(%s, tidy_format := true) ORDER BY POS, SAMPLE_ID"
+  ), dbQuoteString(con, path)))
+  expect_equal(as.integer(out$POS), rep(c(10L, 20L, 30L), each = 2L))
+  expect_equal(out$SAMPLE_ID, rep(c("S1", "S2"), 3L))
+  expect_equal(out$symbol, rep(c("[GENE1]", NA, "[GENE2, GENE3]"), each = 2L))
+  expect_equal(out$INFO_DP, rep(c(7L, NA_integer_, 1234L), each = 2L))
+  expect_equal(out$FORMAT_GT, c("0/1", "1/1", "./.", "0", "0|1|2", "2/2"))
+  expect_equal(out$ad, c("[6, 1]", "[0, 7]", NA, NA, "[4, 5, 6]", "[0, 0, 9]"))
+  expect_equal(out$st, c("[x, y]", "[z]", NA, NA, "[longer, value, three]", "[last]"))
+
+  path <- system.file("extdata", "tidy_chunk_boundary.vcf", package = "Rduckhts")
+  out <- dbGetQuery(con, sprintf(paste(
+    "SELECT count(*) AS n, count(*) FILTER (WHERE VEP_SYMBOL = ['GENE1']",
+    "AND VEP_DISTANCE = [12] AND FORMAT_GT = '0/1') AS correct",
+    "FROM read_bcf(%s, tidy_format := true)"
+  ), dbQuoteString(con, path)))
+  expect_equal(out$n[[1]], 2053)
+  expect_equal(out$correct[[1]], 2053)
+}
+
+test_bcf_index_snapshot <- function() {
+  con <- rduckhts_connect()
+  on.exit(dbDisconnect(con, shutdown = TRUE))
+  directory <- tempfile("duckhts-bcf-snapshot-")
+  dir.create(directory)
+  on.exit(unlink(directory, recursive = TRUE), add = TRUE)
+  bcf_scan_expected_tables(con)
+  fixture <- function(suffix) system.file("extdata", paste0("bcf_scan_contigs.", suffix),
+                                         package = "Rduckhts", mustWork = TRUE)
+  quote <- function(value) as.character(dbQuoteString(con, value))
+  # Both formats have two occupied contigs. Exercise auto discovery and explicit
+  # paths, full/region/sequential scans, complete wide/tidy rows and index counts.
+  for (kind in c("bcf", "tbi", "csi")) for (explicit in c(FALSE, TRUE)) {
+    suffix <- if (kind == "bcf") "bcf" else "full.vcf.gz"
+    index_suffix <- if (kind == "bcf") "csi" else kind
+    path <- file.path(directory, paste0("input.", suffix))
+    expect_true(file.copy(fixture(suffix), path, overwrite = TRUE))
+    index <- if (explicit) file.path(directory, "private.index") else paste0(path, ".", index_suffix)
+    hidden <- paste0(index, ".hidden")
+    build <- sprintf("SELECT * FROM bcf_index(%s,index_path:=%s,min_shift:=%d,threads:=1)",
+                     quote(path), quote(index), if (kind == "tbi") 0L else 14L)
+    for (workers in c(1L, 4L)) for (tidy in c(FALSE, TRUE)) for (mode in c("auto", "region", "sequential")) {
+      dbExecute(con, sprintf("SET threads=%d", workers))
+      dbGetQuery(con, build)
+      source <- sprintf("read_bcf(%s,tidy_format:=%s,decompression_threads:=0%s%s)",
+        quote(path), tolower(tidy), if (explicit) paste0(",index_path:=", quote(index)) else "",
+        switch(mode, auto = "", region = ",region:='chr3:20-40,chr3:20-20'",
+               sequential = ",scan_mode:='sequential'"))
+      # R DuckDB's EXECUTE bookkeeping coerces the first column to numeric.
+      # Keep POS first while retaining every column for exact row comparison.
+      projection <- "SELECT POS, * EXCLUDE (POS) FROM "
+      sql <- paste0(projection, source, " ORDER BY ALL")
+      expected <- dbGetQuery(con, paste0(projection, if (tidy) "expected_tidy" else "expected_sites",
+        if (mode == "region") " WHERE CHROM='chr3'" else "", " ORDER BY ALL"))
+      expect_equal(dbGetQuery(con, sql), expected)
+      dbExecute(con, paste("PREPARE index_scan AS", sql))
+      dbExecute(con, paste("PREPARE index_count AS SELECT count(*) AS n FROM", source))
+      for (damage in c("missing", "corrupt", "empty", "shifted", "identical")) {
+        if (damage == "missing") expect_true(file.rename(index, hidden))
+        else if (damage == "corrupt") writeLines("broken index", index)
+        else if (damage == "identical") dbGetQuery(con, build)
+        else {
+          replacement <- paste0(damage, ".", if (kind == "bcf") "bcf.csi" else paste0("vcf.gz.index.", kind))
+          expect_true(file.copy(fixture(replacement), index, overwrite = TRUE))
+        }
+        # After bind, all mutations retain the original exact rows, including
+        # valid unrelated indexes and matching counts with different offsets.
+        expect_equal(dbGetQuery(con, "EXECUTE index_scan"), expected)
+        expect_equal(dbGetQuery(con, "EXECUTE index_count")$n[[1]], nrow(expected))
+        expect_equal(dbGetQuery(con, "SELECT 4242 AS n")$n, 4242L)
+        if (damage %in% c("missing", "corrupt")) {
+          if (mode == "region") expect_error(dbGetQuery(con, sql), pattern = "region query requires an index")
+          else expect_equal(dbGetQuery(con, sql), expected) # New bind: streaming fallback.
+        }
+      }
+      dbExecute(con, "DEALLOCATE index_scan")
+      dbExecute(con, "DEALLOCATE index_count")
+      if (file.exists(hidden)) unlink(hidden)
+    }
+    # A replacement data+index pair supplied before bind defines a new plan.
+    expect_true(file.copy(fixture(paste0("shifted.", if (kind == "bcf") "bcf" else "vcf.gz")),
+                          path, overwrite = TRUE))
+    dbGetQuery(con, build)
+    expect_equal(dbGetQuery(con, sql), expected)
+    auto_sql <- sub(",scan_mode:='sequential'", "", sql, fixed = TRUE)
+    expect_equal(dbGetQuery(con, auto_sql), expected)
+    region_sql <- sub(",scan_mode:='sequential'", ",region:='chr3:20-40,chr3:20-20'", sql, fixed = TRUE)
+    expected_region <- expected[expected$CHROM == "chr3", ]
+    rownames(expected_region) <- NULL
+    expect_equal(dbGetQuery(con, region_sql), expected_region)
+    unlink(c(path, index))
+  }
+}
+
+bcf_scan_expected_tables <- function(con) {
+  dbExecute(con, "CREATE TABLE expected_sites(CHROM VARCHAR, POS BIGINT, ID VARCHAR, REF VARCHAR,
+    ALT VARCHAR[], QUAL DOUBLE, FILTER VARCHAR[], INFO_DP INTEGER,
+    FORMAT_GT_S1 VARCHAR, FORMAT_GT_S2 VARCHAR)")
+  dbExecute(con, "INSERT INTO expected_sites VALUES
+    ('chr1',10,'known','A',['C'],60,['PASS'],7,'0/1','1/1'),
+    ('chr3',20,'duplicate','G',['T'],50,['PASS'],8,'./1','0/0'),
+    ('chr3',20,'duplicate','G',['T'],50,['PASS'],8,'./1','0/0'),
+    ('chr3',20,'allele','G',['A'],30,['PASS'],9,'1/1','./.'),
+    ('chr3',40,'last','T',['G'],NULL,['PASS'],NULL,'1','0|1')")
+  dbExecute(con, "CREATE VIEW expected_tidy AS
+    SELECT CHROM,POS,ID,REF,ALT,QUAL,FILTER,INFO_DP,SAMPLE_ID,FORMAT_GT
+    FROM expected_sites, LATERAL (VALUES ('S1',FORMAT_GT_S1),('S2',FORMAT_GT_S2))
+    AS samples(SAMPLE_ID,FORMAT_GT)")
+}
+
+test_bcf_contig_dictionary <- function() {
+  con <- rduckhts_connect()
+  on.exit(dbDisconnect(con, shutdown = TRUE))
+  bcf_scan_expected_tables(con)
+  for (threads in c(1L, 4L)) for (tidy in c(FALSE, TRUE)) {
+    dbExecute(con, sprintf("SET threads=%d", threads))
+    expected_table <- if (tidy) "expected_tidy" else "expected_sites"
+    expected <- dbGetQuery(con, paste("SELECT * FROM", expected_table, "ORDER BY ALL"))
+    expected_region <- dbGetQuery(con, paste("SELECT * FROM", expected_table,
+                                            "WHERE CHROM='chr3' ORDER BY ALL"))
+    projection <- if (tidy) "CHROM,POS,ID,SAMPLE_ID,FORMAT_GT" else "CHROM,POS,ID,FORMAT_GT_S1"
+    expected_projection <- dbGetQuery(con, paste("SELECT", projection, "FROM", expected_table, "ORDER BY ALL"))
+    for (header in c("full", "partial", "none")) {
+      path <- system.file("extdata", paste0("bcf_scan_contigs.", header, ".vcf.gz"), package = "Rduckhts")
+      expect_true(nzchar(path))
+      expect_false(file.exists(paste0(path, ".tbi")) || file.exists(paste0(path, ".csi")))
+      source <- sprintf("read_bcf(%s, tidy_format:=%s, decompression_threads:=0",
+                        dbQuoteString(con, path), tolower(tidy))
+      # No-index auto fallback must have the same complete rows.
+      expect_equal(dbGetQuery(con, paste0("SELECT * FROM ", source, ") ORDER BY ALL")), expected)
+      for (kind in c("tbi", "csi")) {
+        index <- paste0(path, ".index.", kind)
+        expect_true(file.exists(index))
+        indexed <- paste0(source, ", index_path:=", dbQuoteString(con, index))
+        for (mode in c("auto", "sequential")) {
+          sql <- paste0(indexed, ", scan_mode:=", dbQuoteString(con, mode), ")")
+          expect_equal(dbGetQuery(con, paste("SELECT * FROM", sql, "ORDER BY ALL")), expected)
+          expect_equal(dbGetQuery(con, paste("SELECT", projection, "FROM", sql, "ORDER BY ALL")),
+                       expected_projection)
+        }
+        region <- paste0(indexed, ", region:='chr3:20-40,chr3:20-20')")
+        expect_equal(dbGetQuery(con, paste("SELECT * FROM", region, "ORDER BY ALL")), expected_region)
+      }
+    }
+    bcf <- system.file("extdata", "bcf_scan_contigs.bcf", package = "Rduckhts")
+    expect_equal(dbGetQuery(con, sprintf("SELECT * FROM read_bcf(%s,tidy_format:=%s) ORDER BY ALL",
+                                         dbQuoteString(con, bcf), tolower(tidy))), expected)
+    empty <- system.file("extdata", "bcf_scan_contigs.empty.vcf.gz", package = "Rduckhts")
+    for (kind in c("tbi", "csi")) {
+      result <- dbGetQuery(con, sprintf("SELECT * FROM read_bcf(%s,index_path:=%s,tidy_format:=%s)",
+        dbQuoteString(con, empty), dbQuoteString(con, paste0(empty, ".index.", kind)), tolower(tidy)))
+      expect_equal(result, expected[FALSE, ])
+    }
+  }
+  path <- system.file("extdata", "bcf_scan_contigs.partial.vcf.gz", package = "Rduckhts")
+  expect_silent(rduckhts_bcf(con, "partial_vcf", path,
+                            index_path = paste0(path, ".index.tbi"), overwrite = TRUE))
+  expect_equal(dbGetQuery(con, "SELECT * FROM partial_vcf ORDER BY ALL"),
+               dbGetQuery(con, "SELECT * FROM expected_sites ORDER BY ALL"))
+}
+
+test_bcf_literal_contigs <- function() {
+  con <- rduckhts_connect()
+  on.exit(dbDisconnect(con, shutdown = TRUE))
+  dbExecute(con, "CREATE TABLE expected(CHROM VARCHAR, POS BIGINT, ID VARCHAR, REF VARCHAR,
+    ALT VARCHAR[], QUAL DOUBLE, FILTER VARCHAR[], FORMAT_GT_S1 VARCHAR)")
+  dbExecute(con, "INSERT INTO expected VALUES
+    ('chr1',150,'ordinary','A',['C'],60,['PASS'],'0/1'),
+    ('chr1:100-200',10,'literal','G',['T'],50,['PASS'],'1|1'),
+    ('chr1:100-200',10,'literal','G',['T'],50,['PASS'],'1|1')")
+  dbExecute(con, "CREATE VIEW expected_tidy AS SELECT * EXCLUDE(FORMAT_GT_S1),
+    'S1' AS SAMPLE_ID, FORMAT_GT_S1 AS FORMAT_GT FROM expected")
+  for (threads in c(1L, 4L)) for (tidy in c(FALSE, TRUE)) {
+    dbExecute(con, sprintf("SET threads=%d", threads))
+    expected <- dbGetQuery(con, paste("SELECT * FROM", if (tidy) "expected_tidy" else "expected",
+                                     "ORDER BY ALL"))
+    selected <- expected[expected$CHROM == "chr1:100-200", ]
+    rownames(selected) <- NULL
+    for (suffix in c("bcf", "vcf.gz")) {
+      path <- system.file("extdata", paste0("bcf_literal_contigs.", suffix),
+                          package = "Rduckhts", mustWork = TRUE)
+      source <- sprintf("read_bcf(%s,tidy_format:=%s,decompression_threads:=0",
+                        dbQuoteString(con, path), tolower(tidy))
+      for (mode in c("auto", "sequential")) {
+        reader <- paste0(source, ",scan_mode:=", dbQuoteString(con, mode), ")")
+        expect_equal(dbGetQuery(con, paste("SELECT * FROM", reader, "ORDER BY ALL")), expected)
+        expect_equal(dbGetQuery(con, paste("SELECT count(*) AS n FROM", reader))$n[[1]], 3)
+        expect_equal(dbGetQuery(con, paste("SELECT CHROM,POS FROM", reader, "ORDER BY ALL")),
+                     expected[c("CHROM", "POS")])
+      }
+      reader <- paste0(source, ",region:='{chr1:100-200}:1-20,{chr1:100-200}:10-10')")
+      expect_equal(dbGetQuery(con, paste("SELECT * FROM", reader, "ORDER BY ALL")), selected)
+      expect_error(dbGetQuery(con, paste0("SELECT * FROM ", source, ",region:='chr1:100-200')")),
+                   pattern = "region list: invalid item")
+    }
+  }
+}
+
+test_bcf_literal_contigs()
+test_bcf_contig_dictionary()
+test_bcf_index_snapshot()
+test_bcf_record_cache()
 test_bcf_string_format_lists()
-test_bcf_v2_sql()
-test_bcf_appender()
+test_bcf_projection_sql()
+test_bcf_materialization()

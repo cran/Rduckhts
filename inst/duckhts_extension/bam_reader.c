@@ -8,7 +8,7 @@
  * Parallelism strategy (indexed BAM/CRAM, no user region):
  *   - Global init advertises max_threads = min(n_contigs, 16)
  *   - Each DuckDB thread opens its own samFile + hts_idx_t
- *   - Threads claim contigs via __sync_fetch_and_add on a shared counter
+ *   - Threads claim contigs and one no-coordinate tail via an atomic counter
  *   - Per-thread hts_set_threads for htslib I/O decompression
  *
  * For user-supplied region queries the multi-region iterator
@@ -27,6 +27,7 @@ DUCKDB_EXTENSION_EXTERN
 #include <stdbool.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <errno.h>
 #include <strings.h>
 
 #include <htslib/sam.h>
@@ -35,6 +36,10 @@ DUCKDB_EXTENSION_EXTERN
 #include <htslib/kstring.h>
 
 #include "include/hts_io_tuning.h"
+#include "include/duckdb_alloc.h"
+#include "include/duckdb_list.h"
+#include "include/bam_format.h"
+#include "include/region_list.h"
 #include "include/seq_encoding.h"
 #include "include/quality_encoding.h"
 
@@ -112,13 +117,10 @@ static duckdb_logical_type bam_std_tag_type(const bam_std_tag_t *t) {
     }
 }
 
-static void bam_assign_list_int(duckdb_vector vec, idx_t row, const uint8_t *aux) {
+static int bam_assign_list_int(duckdb_vector vec, idx_t row, const uint8_t *aux) {
     uint32_t len = bam_auxB_len(aux);
     duckdb_list_entry entry;
-    entry.offset = duckdb_list_vector_get_size(vec);
-    entry.length = len;
-    duckdb_list_vector_reserve(vec, entry.offset + entry.length);
-    duckdb_list_vector_set_size(vec, entry.offset + entry.length);
+    if (!duckhts_list_extend(vec, len, &entry)) return 0;
 
     duckdb_vector child = duckdb_list_vector_get_child(vec);
     int64_t *data = (int64_t *)duckdb_vector_get_data(child);
@@ -127,15 +129,13 @@ static void bam_assign_list_int(duckdb_vector vec, idx_t row, const uint8_t *aux
     }
     duckdb_list_entry *list_data = (duckdb_list_entry *)duckdb_vector_get_data(vec);
     list_data[row] = entry;
+    return 1;
 }
 
-static void bam_assign_list_double(duckdb_vector vec, idx_t row, const uint8_t *aux) {
+static int bam_assign_list_double(duckdb_vector vec, idx_t row, const uint8_t *aux) {
     uint32_t len = bam_auxB_len(aux);
     duckdb_list_entry entry;
-    entry.offset = duckdb_list_vector_get_size(vec);
-    entry.length = len;
-    duckdb_list_vector_reserve(vec, entry.offset + entry.length);
-    duckdb_list_vector_set_size(vec, entry.offset + entry.length);
+    if (!duckhts_list_extend(vec, len, &entry)) return 0;
 
     duckdb_vector child = duckdb_list_vector_get_child(vec);
     double *data = (double *)duckdb_vector_get_data(child);
@@ -144,51 +144,7 @@ static void bam_assign_list_double(duckdb_vector vec, idx_t row, const uint8_t *
     }
     duckdb_list_entry *list_data = (duckdb_list_entry *)duckdb_vector_get_data(vec);
     list_data[row] = entry;
-}
-
-static void bam_aux_to_string(const uint8_t *aux, kstring_t *ks) {
-    ks->l = 0;
-    char type = bam_aux_type(aux);
-    switch (type) {
-        case 'A': {
-            kputc(bam_aux2A(aux), ks);
-            break;
-        }
-        case 'i':
-        case 'I':
-        case 's':
-        case 'S':
-        case 'c':
-        case 'C':
-            ksprintf(ks, "%" PRId64, bam_aux2i(aux));
-            break;
-        case 'f':
-        case 'd':
-            ksprintf(ks, "%g", bam_aux2f(aux));
-            break;
-        case 'Z':
-        case 'H': {
-            const char *z = bam_aux2Z(aux);
-            if (z) kputs(z, ks);
-            break;
-        }
-        case 'B': {
-            char subtype = aux[1];
-            uint32_t len = bam_auxB_len(aux);
-            kputc(subtype, ks);
-            for (uint32_t i = 0; i < len; i++) {
-                kputc(',', ks);
-                if (subtype == 'f' || subtype == 'd') {
-                    ksprintf(ks, "%g", bam_auxB2f(aux, i));
-                } else {
-                    ksprintf(ks, "%" PRId64, bam_auxB2i(aux, i));
-                }
-            }
-            break;
-        }
-        default:
-            break;
-    }
+    return 1;
 }
 
 /* ================================================================
@@ -250,7 +206,7 @@ typedef struct {
  * ================================================================ */
 
 typedef struct {
-    int current_contig; /* atomic counter — threads fetch-and-add */
+    idx_t current_partition; /* named contigs, then one no-coordinate tail */
     int n_contigs;
     int has_region;
 } bam_global_init_data_t;
@@ -268,11 +224,9 @@ typedef struct {
 
     int done;
     int is_parallel;
-    int assigned_contig;
     int needs_next_contig;
     int count_only;
     int need_seq_buffers;
-    int need_file_offset;
     uint64_t count_remaining;
 
     idx_t column_count;
@@ -284,12 +238,14 @@ typedef struct {
     char *qual_buf;
     size_t qual_buf_cap;
     duckhts_quality_representation qual_repr;
-    kstring_t cigar_tmp;
-    kstring_t aux_tmp;
+    char *cigar_buf; /* Worker-owned scratch; allocated with duckdb_malloc */
+    size_t cigar_buf_cap;
+    char *aux_buf;
+    size_t aux_buf_cap;
 
     /* Read group caching */
     char *last_rg_id;
-    char *last_sample_id;
+    int has_sample;
     kstring_t rg_tmp;
 } bam_local_init_data_t;
 
@@ -304,11 +260,7 @@ static void destroy_bam_bind(void *data) {
     if (b->index_path) duckdb_free(b->index_path);
     if (b->reference) duckdb_free(b->reference);
     if (b->region) duckdb_free(b->region);
-    if (b->regions) {
-        for (unsigned int i = 0; i < b->n_regions; i++)
-            duckdb_free(b->regions[i]);
-        duckdb_free(b->regions);
-    }
+    free(b->regions); /* one region-list allocation, including strings */
     duckdb_free(b);
 }
 
@@ -327,11 +279,10 @@ static void destroy_bam_local(void *data) {
     if (l->column_ids) duckdb_free(l->column_ids);
     if (l->seq_buf) free(l->seq_buf);
     if (l->qual_buf) free(l->qual_buf);
-    if (l->last_rg_id) free(l->last_rg_id);
-    if (l->last_sample_id) free(l->last_sample_id);
+    if (l->last_rg_id) duckdb_free(l->last_rg_id);
     ks_free(&l->rg_tmp);
-    ks_free(&l->cigar_tmp);
-    ks_free(&l->aux_tmp);
+    if (l->cigar_buf) duckdb_free(l->cigar_buf);
+    if (l->aux_buf) duckdb_free(l->aux_buf);
     duckdb_free(l);
 }
 
@@ -339,33 +290,8 @@ static void destroy_bam_local(void *data) {
  * Region parsing helper — split comma-separated regions
  * ================================================================ */
 
-static void parse_regions(const char *region_str, char ***out_regions, unsigned int *out_count) {
-    *out_regions = NULL;
-    *out_count = 0;
-    if (!region_str || strlen(region_str) == 0) return;
-
-    /* Count commas to determine array size */
-    unsigned int count = 1;
-    for (const char *p = region_str; *p; p++)
-        if (*p == ',') count++;
-
-    char **arr = (char **)duckdb_malloc(sizeof(char *) * count);
-    char *dup = (char *)duckdb_malloc(strlen(region_str) + 1);
-    strcpy(dup, region_str);
-
-    unsigned int idx = 0;
-    char *tok = strtok(dup, ",");
-    while (tok && idx < count) {
-        size_t len = strlen(tok) + 1;
-        arr[idx] = (char *)duckdb_malloc(len);
-        memcpy(arr[idx], tok, len);
-        idx++;
-        tok = strtok(NULL, ",");
-    }
-    duckdb_free(dup);
-
-    *out_regions = arr;
-    *out_count = idx;
+static int bam_region_name2id(void *hdr, const char *name) {
+    return sam_hdr_name2tid((sam_hdr_t *)hdr, name);
 }
 
 /* ================================================================
@@ -373,7 +299,8 @@ static void parse_regions(const char *region_str, char ***out_regions, unsigned 
  * ================================================================ */
 
 static int ensure_seq_buf(bam_local_init_data_t *l, int seq_len) {
-    size_t need = (size_t)(seq_len + 1);
+    if (seq_len < 0 || (uint64_t)seq_len >= SIZE_MAX / 2) return 0;
+    size_t need = (size_t)seq_len + 1;
     if (need > l->seq_buf_cap) {
         size_t new_cap = need * 2;
         char *new_seq = (char *)realloc(l->seq_buf, new_cap);
@@ -390,19 +317,19 @@ static int ensure_seq_buf(bam_local_init_data_t *l, int seq_len) {
     return 1;
 }
 
-/* ================================================================
- * CIGAR → string
- * Uses bam_cigar_op / bam_cigar_oplen / bam_cigar_opchr from sam.h
- * ================================================================ */
-
-static int cigar_to_kstring(const uint32_t *cigar, int n_cigar, kstring_t *ks) {
-    ks->l = 0;
-    if (ks->s) ks->s[0] = '\0';
-    for (int i = 0; i < n_cigar; i++) {
-        if (kputw((int)bam_cigar_oplen(cigar[i]), ks) < 0) return -1;
-        if (kputc(bam_cigar_opchr(bam_cigar_op(cigar[i])), ks) < 0) return -1;
-    }
-    return 0;
+/* Scratch contents are replaced by the next formatter call, never retained
+ * across growth. The previous allocation remains owned on failure. */
+static int bam_reserve_text(char **buffer, size_t *capacity, size_t required) {
+    if (required <= *capacity) return 1;
+    size_t next = required;
+    /* Amortize small growth, but do not double a new record's worst-case bound. */
+    if (*capacity <= SIZE_MAX / 2 && *capacity * 2 > next) next = *capacity * 2;
+    char *data = duckdb_malloc(next);
+    if (!data) return 0;
+    if (*buffer) duckdb_free(*buffer);
+    *buffer = data;
+    *capacity = next;
+    return 1;
 }
 
 /* ================================================================
@@ -441,11 +368,16 @@ static int bam_try_get_index_row_count(hts_idx_t *idx, uint64_t *out_total) {
 
     int nseq = hts_idx_nseq(idx);
     uint64_t total = hts_idx_get_n_no_coor(idx);
+    /* Zero also means the optional trailing count was absent in an older
+     * BAI/CSI. Only a nonzero count proves this statistic was supplied. */
+    if (total == 0) return 0;
     for (int tid = 0; tid < nseq; tid++) {
         uint64_t mapped = 0, unmapped = 0;
         if (hts_idx_get_stat(idx, tid, &mapped, &unmapped) != 0) {
             return 0;
         }
+        if (mapped > UINT64_MAX - total || unmapped > UINT64_MAX - total - mapped)
+            return 0;
         total += mapped + unmapped;
     }
 
@@ -471,8 +403,15 @@ static void bam_read_bind(duckdb_bind_info info) {
     /* Parse optional region parameter */
     char *region = NULL;
     duckdb_value region_val = duckdb_bind_get_named_parameter(info, "region");
-    if (region_val && !duckdb_is_null_value(region_val))
+    if (region_val && !duckdb_is_null_value(region_val)) {
         region = duckdb_get_varchar(region_val);
+        if (!region) {
+            duckdb_destroy_value(&region_val);
+            duckdb_free(file_path);
+            duckdb_bind_set_error(info, "region list: out of memory reading region");
+            return;
+        }
+    }
     if (region_val) duckdb_destroy_value(&region_val);
 
     /* Parse optional explicit index path */
@@ -541,8 +480,17 @@ static void bam_read_bind(duckdb_bind_info info) {
         return;
     }
 
-    bam_bind_data_t *bind = (bam_bind_data_t *)duckdb_malloc(sizeof(bam_bind_data_t));
-    memset(bind, 0, sizeof(bam_bind_data_t));
+    bam_bind_data_t *bind = duckhts_alloc_array(1, sizeof(*bind));
+    if (!bind) {
+        duckdb_bind_set_error(info, "read_bam: out of memory allocating bind state");
+        sam_hdr_destroy(hdr);
+        sam_close(fp);
+        duckdb_free(file_path);
+        if (index_path) duckdb_free(index_path);
+        if (region) duckdb_free(region);
+        if (reference) duckdb_free(reference);
+        return;
+    }
     bind->file_path = file_path;
     bind->index_path = index_path;
     bind->reference = reference;
@@ -558,7 +506,18 @@ static void bam_read_bind(duckdb_bind_info info) {
     bind->scan_sequential = scan_sequential;
 
     /* Parse comma-separated regions (if any) */
-    parse_regions(region, &bind->regions, &bind->n_regions);
+    char region_error[256];
+    if (!duckhts_region_list_parse(region, &bind->regions, &bind->n_regions,
+                                   region_error, sizeof(region_error)) ||
+        !duckhts_region_list_validate(bind->regions, bind->n_regions,
+                                      bam_region_name2id, hdr,
+                                      region_error, sizeof(region_error))) {
+        duckdb_bind_set_error(info, region_error);
+        sam_hdr_destroy(hdr);
+        sam_close(fp);
+        destroy_bam_bind(bind);
+        return;
+    }
 
     /* Optional tag controls */
     duckdb_value std_val = duckdb_bind_get_named_parameter(info, "standard_tags");
@@ -727,11 +686,13 @@ static void bam_read_global_init(duckdb_init_info info) {
     bam_bind_data_t *bind = (bam_bind_data_t *)duckdb_init_get_bind_data(info);
     idx_t column_count = duckdb_init_get_column_count(info);
 
-    bam_global_init_data_t *global = (bam_global_init_data_t *)duckdb_malloc(
-        sizeof(bam_global_init_data_t));
-    memset(global, 0, sizeof(bam_global_init_data_t));
+    bam_global_init_data_t *global = duckhts_alloc_array(1, sizeof(*global));
+    if (!global) {
+        duckdb_init_set_error(info, "read_bam: out of memory allocating global state");
+        return;
+    }
 
-    global->current_contig = 0;
+    global->current_partition = 0;
     global->has_region = (bind->n_regions > 0);
 
     /*
@@ -761,19 +722,24 @@ static void bam_read_global_init(duckdb_init_info info) {
 static void bam_read_local_init(duckdb_init_info info) {
     bam_bind_data_t *bind = (bam_bind_data_t *)duckdb_init_get_bind_data(info);
 
-    bam_local_init_data_t *local = (bam_local_init_data_t *)duckdb_malloc(
-        sizeof(bam_local_init_data_t));
-    memset(local, 0, sizeof(bam_local_init_data_t));
+    bam_local_init_data_t *local = duckhts_alloc_array(1, sizeof(*local));
+    if (!local) {
+        duckdb_init_set_error(info, "read_bam: out of memory allocating worker state");
+        return;
+    }
 
     local->column_count = duckdb_init_get_column_count(info);
     if (local->column_count > 0) {
-        local->column_ids = (idx_t *)duckdb_malloc(sizeof(idx_t) * local->column_count);
+        local->column_ids = duckhts_alloc_array(local->column_count, sizeof(*local->column_ids));
+        if (!local->column_ids) {
+            duckdb_init_set_error(info, "read_bam: out of memory allocating projected columns");
+            destroy_bam_local(local);
+            return;
+        }
         for (idx_t i = 0; i < local->column_count; i++) {
             local->column_ids[i] = duckdb_init_get_column_index(info, i);
             if (local->column_ids[i] == BAM_COL_SEQ || local->column_ids[i] == BAM_COL_QUAL) {
                 local->need_seq_buffers = 1;
-            } else if (local->column_ids[i] == BAM_COL_FILE_OFFSET) {
-                local->need_file_offset = 1;
             }
         }
     }
@@ -788,7 +754,6 @@ static void bam_read_local_init(duckdb_init_info info) {
 
     int is_parallel = (!bind->scan_sequential && bind->has_index && bind->n_contigs > 1 && bind->n_regions == 0);
     local->is_parallel = is_parallel;
-    local->assigned_contig = -1;
     local->needs_next_contig = is_parallel;
     local->qual_repr = bind->qual_repr;
 
@@ -796,7 +761,7 @@ static void bam_read_local_init(duckdb_init_info info) {
     local->fp = sam_open(bind->file_path, "r");
     if (!local->fp) {
         duckdb_init_set_error(info, "Failed to open SAM/BAM/CRAM file");
-        duckdb_free(local);
+        destroy_bam_local(local);
         return;
     }
     duckhts_apply_remote_hts_tuning(
@@ -810,8 +775,7 @@ static void bam_read_local_init(duckdb_init_info info) {
     if (bind->reference) {
         if (hts_set_opt(local->fp, CRAM_OPT_REFERENCE, bind->reference) < 0) {
             duckdb_init_set_error(info, "Failed to set CRAM reference");
-            sam_close(local->fp);
-            duckdb_free(local);
+            destroy_bam_local(local);
             return;
         }
     }
@@ -828,17 +792,18 @@ static void bam_read_local_init(duckdb_init_info info) {
     /* Read header — each thread needs its own copy */
     local->hdr = sam_hdr_read(local->fp);
     if (!local->hdr) {
-        sam_close(local->fp); local->fp = NULL;
         duckdb_init_set_error(info, "Failed to read SAM/BAM/CRAM header");
-        duckdb_free(local);
+        destroy_bam_local(local);
         return;
     }
 
     /* Allocate a reusable bam1_t record */
     local->rec = bam_init1();
-    local->rg_tmp.l = 0;
-    local->rg_tmp.m = 0;
-    local->rg_tmp.s = NULL;
+    if (!local->rec) {
+        duckdb_init_set_error(info, "read_bam: out of memory allocating alignment record");
+        destroy_bam_local(local);
+        return;
+    }
 
     /* Load index if needed for parallel scanning or region queries */
     if (is_parallel || bind->n_regions > 0) {
@@ -850,9 +815,10 @@ static void bam_read_local_init(duckdb_init_info info) {
                 destroy_bam_local(local);
                 return;
             }
-            /* No index but parallel was requested — fall back to sequential */
-            local->is_parallel = 0;
-            local->needs_next_contig = 0;
+            /* A per-worker fallback would scan the whole file once per worker. */
+            duckdb_init_set_error(info, "read_bam: failed to reload index for full-file scan");
+            destroy_bam_local(local);
+            return;
         }
     }
 
@@ -878,7 +844,7 @@ static void bam_read_local_init(duckdb_init_info info) {
 
 /* ================================================================
  * Claim next contig for parallel scanning
- * Returns 1 if a contig was claimed, 0 if done
+ * Returns 1 for a partition, 0 at EOF, -1 on iterator construction failure.
  * ================================================================ */
 
 static int claim_next_contig(bam_local_init_data_t *local,
@@ -892,23 +858,28 @@ static int claim_next_contig(bam_local_init_data_t *local,
         local->itr = NULL;
     }
 
-    for (;;) {
-        int next = __sync_fetch_and_add(&global->current_contig, 1);
-        if (next >= global->n_contigs)
-            return 0;  /* all contigs claimed */
+    idx_t next = __sync_fetch_and_add(&global->current_partition, 1);
+    if (next > (idx_t)global->n_contigs) return 0;
 
-        local->assigned_contig = next;
-
-        /* sam_itr_queryi: iterate reads overlapping the entire contig.
-         * tid=next, beg=0, end=HTS_POS_MAX covers the full reference. */
-        local->itr = sam_itr_queryi(local->idx, next, 0, HTS_POS_MAX);
-        if (local->itr) {
-            local->needs_next_contig = 0;
-            return 1;
+    int tid = next == (idx_t)global->n_contigs ? HTS_IDX_NOCOOR : (int)next;
+    /* Do not skip the tail based on n_no_coor: older BAI/CSI files may omit
+     * that optional count, and CRAI does not supply it. */
+    errno = 0;
+    local->itr = sam_itr_queryi(local->idx, tid, 0, HTS_POS_MAX);
+    if (!local->itr) {
+        /* Without a mapped chunk or optional count, HTSlib cannot distinguish
+         * an empty BAM from an all-unplaced BAM. No named-contig iterator can
+         * have read/searched this handle in that case: it is still immediately
+         * after the header. The unique tail owner streams the remaining file.
+         * Allocation failures set errno and must not trigger this fallback. */
+        if (tid == HTS_IDX_NOCOOR && hts_get_format(local->fp)->format == bam &&
+            errno == 0 && hts_idx_get_n_no_coor(local->idx) == 0) {
+            local->itr = sam_itr_queryi(NULL, HTS_IDX_REST, 0, 0);
         }
-
-        /* Contig may have zero indexed reads — try the next claim. */
+        if (!local->itr) return -1;
     }
+    local->needs_next_contig = 0;
+    return 1;
 }
 
 /* ================================================================
@@ -942,7 +913,10 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
 
     /* For parallel scans, claim first/next contig if needed */
     if (local->needs_next_contig) {
-        if (!claim_next_contig(local, global)) {
+        int claimed = claim_next_contig(local, global);
+        if (claimed <= 0) {
+            if (claimed < 0)
+                duckdb_function_set_error(info, "read_bam: failed to create full-file iterator");
             local->done = 1;
             duckdb_data_chunk_set_size(output, 0);
             return;
@@ -961,10 +935,23 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
 
         if (ret < 0) {
             /* ret == -1: EOF/end-of-region.  ret < -1: error. */
+            if (ret < -1) {
+                duckdb_function_set_error(info, "read_bam: failed to read SAM/BAM/CRAM record");
+                local->done = 1;
+                duckdb_data_chunk_set_size(output, 0);
+                return;
+            }
             if (local->is_parallel && ret == -1) {
                 /* Try next contig and keep filling this chunk if we can. */
                 local->needs_next_contig = 1;
-                if (!claim_next_contig(local, global)) {
+                int claimed = claim_next_contig(local, global);
+                if (claimed < 0) {
+                    duckdb_function_set_error(info, "read_bam: failed to create full-file iterator");
+                    local->done = 1;
+                    duckdb_data_chunk_set_size(output, 0);
+                    return;
+                }
+                if (claimed == 0) {
                     local->done = 1;
                     break;
                 }
@@ -976,16 +963,6 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
 
         bam1_t *b = local->rec;
         int seq_len = 0;
-        uint64_t file_offset = 0;
-
-        if (local->need_file_offset) {
-            /* Capture virtual file offset after reading this record.
-             * For indexed scans, itr->curr_off holds the next read's offset;
-             * for sequential scans, bgzf_tell gives the same. */
-            file_offset = (local->fp && local->fp->fp.bgzf)
-                ? (uint64_t)bgzf_tell(local->fp->fp.bgzf)
-                : 0;
-        }
 
         if (local->need_seq_buffers) {
             seq_len = b->core.l_qseq;
@@ -1039,30 +1016,25 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
 
             case BAM_COL_CIGAR: {
                 if (bind->cigar_binary) {
-                    duckdb_vector child_vec = duckdb_list_vector_get_child(vec);
-                    duckdb_list_entry *list_data =
-                        (duckdb_list_entry *)duckdb_vector_get_data(vec);
                     idx_t n = (idx_t)b->core.n_cigar;
-                    idx_t child_offset = duckdb_list_vector_get_size(vec);
+                    duckdb_list_entry entry;
+                    if (!duckhts_list_extend(vec, n, &entry)) goto list_error;
                     if (n > 0) {
-                        duckdb_list_vector_reserve(vec, child_offset + n);
-                        duckdb_list_vector_set_size(vec, child_offset + n);
+                        duckdb_vector child_vec = duckdb_list_vector_get_child(vec);
                         uint32_t *child_data = (uint32_t *)duckdb_vector_get_data(child_vec);
-                        memcpy(child_data + child_offset, bam_get_cigar(b),
+                        memcpy(child_data + entry.offset, bam_get_cigar(b),
                                sizeof(uint32_t) * (size_t)n);
                     }
-                    list_data[row_count].offset = child_offset;
-                    list_data[row_count].length = n;
+                    ((duckdb_list_entry *)duckdb_vector_get_data(vec))[row_count] = entry;
                 } else if (b->core.n_cigar > 0) {
-                    if (cigar_to_kstring(bam_get_cigar(b), (int)b->core.n_cigar,
-                                         &local->cigar_tmp) == 0 &&
-                        local->cigar_tmp.s) {
-                        duckdb_vector_assign_string_element_len(vec, row_count,
-                                                                local->cigar_tmp.s,
-                                                                local->cigar_tmp.l);
-                    } else {
-                        duckdb_vector_assign_string_element(vec, row_count, "*");
-                    }
+                    size_t capacity, length;
+                    if (!duckhts_bam_cigar_capacity(b->core.n_cigar, &capacity)) goto format_error;
+                    if (!bam_reserve_text(&local->cigar_buf, &local->cigar_buf_cap, capacity))
+                        goto text_oom;
+                    if (!duckhts_bam_cigar_format(bam_get_cigar(b), b->core.n_cigar,
+                                                 local->cigar_buf, local->cigar_buf_cap, &length))
+                        goto format_error;
+                    duckdb_vector_assign_string_element_len(vec, row_count, local->cigar_buf, length);
                 } else {
                     duckdb_vector_assign_string_element(vec, row_count, "*");
                 }
@@ -1093,25 +1065,18 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
             case BAM_COL_SEQ: {
                 if (bind->seq_nt16) {
                     /* Emit packed nt16 codes as LIST(UTINYINT) */
-                    duckdb_vector child_vec = duckdb_list_vector_get_child(vec);
-                    duckdb_list_entry *list_data =
-                        (duckdb_list_entry *)duckdb_vector_get_data(vec);
-                    idx_t child_offset = duckdb_list_vector_get_size(vec);
+                    duckdb_list_entry entry;
+                    if (!duckhts_list_extend(vec, (idx_t)seq_len, &entry)) goto list_error;
                     if (seq_len > 0) {
-                        duckdb_list_vector_reserve(vec, child_offset + seq_len);
-                        duckdb_list_vector_set_size(vec, child_offset + seq_len);
+                        duckdb_vector child_vec = duckdb_list_vector_get_child(vec);
                         uint8_t *child_data =
                             (uint8_t *)duckdb_vector_get_data(child_vec);
                         const uint8_t *raw_seq = bam_get_seq(b);
                         for (int k = 0; k < seq_len; k++)
-                            child_data[child_offset + k] =
+                            child_data[entry.offset + k] =
                                 (uint8_t)bam_seqi(raw_seq, k);
-                        list_data[row_count].offset = child_offset;
-                        list_data[row_count].length = (idx_t)seq_len;
-                    } else {
-                        list_data[row_count].offset = child_offset;
-                        list_data[row_count].length = 0;
                     }
+                    ((duckdb_list_entry *)duckdb_vector_get_data(vec))[row_count] = entry;
                 } else {
                     if (seq_len > 0) {
                         seq_decode_to_string(bam_get_seq(b), seq_len,
@@ -1128,16 +1093,12 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
             case BAM_COL_QUAL: {
                 if (seq_len > 0 && bam_get_qual(b)[0] != 255) {
                     if (local->qual_repr == DUCKHTS_QUALITY_REPR_PHRED) {
+                        duckdb_list_entry entry;
+                        if (!duckhts_list_extend(vec, (idx_t)seq_len, &entry)) goto list_error;
                         duckdb_vector child_vec = duckdb_list_vector_get_child(vec);
-                        duckdb_list_entry *list_data =
-                            (duckdb_list_entry *)duckdb_vector_get_data(vec);
-                        idx_t child_offset = duckdb_list_vector_get_size(vec);
-                        duckdb_list_vector_reserve(vec, child_offset + seq_len);
-                        duckdb_list_vector_set_size(vec, child_offset + seq_len);
                         uint8_t *child_data = (uint8_t *)duckdb_vector_get_data(child_vec);
-                        memcpy(child_data + child_offset, bam_get_qual(b), (size_t)seq_len);
-                        list_data[row_count].offset = child_offset;
-                        list_data[row_count].length = (idx_t)seq_len;
+                        memcpy(child_data + entry.offset, bam_get_qual(b), (size_t)seq_len);
+                        ((duckdb_list_entry *)duckdb_vector_get_data(vec))[row_count] = entry;
                     } else {
                         qual_to_string(bam_get_qual(b), seq_len, local->qual_buf);
                         duckdb_vector_assign_string_element(vec, row_count,
@@ -1176,18 +1137,29 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
                     break;
                 }
                 if (!local->last_rg_id || strcmp(local->last_rg_id, rg) != 0) {
-                    free(local->last_rg_id);
-                    free(local->last_sample_id);
-                    local->last_rg_id = strdup(rg);
-                    local->last_sample_id = NULL;
-                    local->rg_tmp.l = 0;
-                    if (sam_hdr_find_tag_id(local->hdr, "RG", "ID", rg, "SM", &local->rg_tmp) == 0 &&
-                        local->rg_tmp.s && local->rg_tmp.l > 0) {
-                        local->last_sample_id = strdup(local->rg_tmp.s);
+                    char *next_rg = duckhts_copy_string(rg);
+                    if (!next_rg) {
+                        duckdb_function_set_error(info, "read_bam: out of memory caching SAMPLE_ID read group");
+                        local->done = 1;
+                        duckdb_data_chunk_set_size(output, 0);
+                        return;
                     }
+                    local->rg_tmp.l = 0;
+                    int status = sam_hdr_find_tag_id(local->hdr, "RG", "ID", rg, "SM", &local->rg_tmp);
+                    if (status < -1) {
+                        duckdb_free(next_rg);
+                        duckdb_function_set_error(info, "read_bam: HTSlib failed to resolve SAMPLE_ID");
+                        local->done = 1;
+                        duckdb_data_chunk_set_size(output, 0);
+                        return;
+                    }
+                    if (local->last_rg_id) duckdb_free(local->last_rg_id);
+                    local->last_rg_id = next_rg;
+                    local->has_sample = status == 0 && local->rg_tmp.l > 0;
                 }
-                if (local->last_sample_id) {
-                    duckdb_vector_assign_string_element(vec, row_count, local->last_sample_id);
+                if (local->has_sample) {
+                    /* DuckDB copies the worker-owned lookup string. */
+                    duckdb_vector_assign_string_element_len(vec, row_count, local->rg_tmp.s, local->rg_tmp.l);
                 } else {
                     set_null(vec, row_count);
                 }
@@ -1195,8 +1167,16 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
             }
 
             case BAM_COL_FILE_OFFSET: {
+                /* Only BGZF BAM has a per-record virtual position here. SAM
+                 * may read ahead; CRAM uses another fp union member. is_bgzf
+                 * selects the handle, not the compression (e.g. naked BAM). */
+                const htsFormat *format = hts_get_format(local->fp);
+                if (!local->fp->is_bgzf || format->format != bam || format->compression != bgzf) {
+                    set_null(vec, row_count);
+                    break;
+                }
                 uint64_t *data = (uint64_t *)duckdb_vector_get_data(vec);
-                data[row_count] = file_offset;
+                data[row_count] = (uint64_t)bgzf_tell(local->fp->fp.bgzf);
                 break;
             }
 
@@ -1237,9 +1217,9 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
                             case 'B': {
                                 char subtype = aux[1];
                                 if (subtype == 'f' || subtype == 'd') {
-                                    bam_assign_list_double(vec, row_count, aux);
+                                    if (!bam_assign_list_double(vec, row_count, aux)) goto list_error;
                                 } else {
-                                    bam_assign_list_int(vec, row_count, aux);
+                                    if (!bam_assign_list_int(vec, row_count, aux)) goto list_error;
                                 }
                                 break;
                             }
@@ -1250,7 +1230,7 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
                     } else if (bind->auxiliary_tags &&
                                (int)col_id == bind->aux_col_idx) {
                         uint8_t *aux = bam_aux_first(b);
-                        int count = 0;
+                        idx_t count = 0;
                         while (aux) {
                             char tagbuf[3] = {0, 0, 0};
                             const char *tag = bam_aux_tag(aux);
@@ -1261,6 +1241,7 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
                             }
                             aux = bam_aux_next(b, aux);
                         }
+                        if (errno != ENOENT) goto format_error;
 
                         if (count == 0) {
                             duckdb_vector_ensure_validity_writable(vec);
@@ -1274,17 +1255,14 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
                         }
 
                         duckdb_list_entry entry;
-                        entry.offset = duckdb_list_vector_get_size(vec);
-                        entry.length = count;
-                        duckdb_list_vector_reserve(vec, entry.offset + entry.length);
-                        duckdb_list_vector_set_size(vec, entry.offset + entry.length);
+                        if (!duckhts_list_extend(vec, count, &entry)) goto list_error;
 
                         duckdb_vector child = duckdb_list_vector_get_child(vec);
                         duckdb_vector key_vec = duckdb_struct_vector_get_child(child, 0);
                         duckdb_vector val_vec = duckdb_struct_vector_get_child(child, 1);
 
                         aux = bam_aux_first(b);
-                        int write_idx = 0;
+                        idx_t write_idx = 0;
                         while (aux && write_idx < count) {
                             char tagbuf[3] = {0, 0, 0};
                             const char *tag = bam_aux_tag(aux);
@@ -1296,10 +1274,15 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
                             }
                             duckdb_vector_assign_string_element(
                                 key_vec, entry.offset + write_idx, tagbuf);
-                            bam_aux_to_string(aux, &local->aux_tmp);
-                            duckdb_vector_assign_string_element(
-                                val_vec, entry.offset + write_idx,
-                                local->aux_tmp.s ? local->aux_tmp.s : "");
+                            size_t capacity, length;
+                            if (!duckhts_bam_aux_capacity(aux, b->data + b->l_data, &capacity))
+                                goto format_error;
+                            if (!bam_reserve_text(&local->aux_buf, &local->aux_buf_cap, capacity))
+                                goto text_oom;
+                            if (!duckhts_bam_aux_format(aux, local->aux_buf,
+                                                       local->aux_buf_cap, &length)) goto format_error;
+                            duckdb_vector_assign_string_element_len(
+                                val_vec, entry.offset + write_idx, local->aux_buf, length);
                             write_idx++;
                             aux = bam_aux_next(b, aux);
                         }
@@ -1318,6 +1301,19 @@ static void bam_read_function(duckdb_function_info info, duckdb_data_chunk outpu
     } /* while rows */
 
     duckdb_data_chunk_set_size(output, row_count);
+    return;
+
+list_error:
+    duckdb_function_set_error(info, "read_bam: failed to grow output list");
+    goto materialization_error;
+text_oom:
+    duckdb_function_set_error(info, "read_bam: out of memory allocating formatter scratch");
+    goto materialization_error;
+format_error:
+    duckdb_function_set_error(info, "read_bam: failed to format CIGAR or AUX value");
+materialization_error:
+    local->done = 1;
+    duckdb_data_chunk_set_size(output, 0);
 }
 
 /* ================================================================
