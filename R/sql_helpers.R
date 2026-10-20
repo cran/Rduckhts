@@ -24,6 +24,37 @@ build_param_str <- function(params) {
   paste0(", ", paste(names(params), ":=", params, collapse = ", "))
 }
 
+# One whole number from low to high as SQL integer text. The error names the
+# argument and its range. high must fit an R integer.
+sql_whole_number <- function(value, name, high, low = 0) {
+  if (!is.numeric(value) || length(value) != 1L || is.na(value) ||
+      value != floor(value) || value < low || value > high) {
+    stop(name, " must be one whole number from ", low, " to ",
+         format(high, scientific = FALSE), call. = FALSE)
+  }
+  as.character(as.integer(value))
+}
+
+# `regions := getvariable('<name>')`, naming a session variable that holds a
+# STRUCT(chrom VARCHAR, start BIGINT, "end" BIGINT)[] value. The name is a
+# quoted SQL string literal; it is never spliced as an identifier.
+.duckhts_regions_expression <- function(con, regions_var) {
+  if (!is.character(regions_var) || length(regions_var) != 1L || is.na(regions_var) ||
+      !nzchar(regions_var)) {
+    stop("regions_var must be a single non-missing, non-empty string naming a session variable",
+         call. = FALSE)
+  }
+  # getvariable() of an unknown name is NULL, which would silently mean a full
+  # scan. A typo must be an error; an existing NULL variable is still NULL.
+  known <- DBI::dbGetQuery(con, paste0(
+    "SELECT count(*) AS n FROM duckdb_variables() WHERE name = ", sql_quote_string(con, regions_var)))$n
+  if (!isTRUE(known > 0)) {
+    stop("regions_var: no session variable named '", regions_var,
+         "' exists on this connection; create it with SET VARIABLE", call. = FALSE)
+  }
+  paste0("getvariable(", sql_quote_string(con, regions_var), ")")
+}
+
 sql_varchar_list_literal <- function(con, x, name = "value") {
   if (is.null(x) || !length(x)) return("[]::VARCHAR[]")
   if (!is.character(x) || anyNA(x) || any(!nzchar(x))) {
@@ -160,14 +191,14 @@ resolve_munge_column_map <- function(raw_map, available_columns) {
 read_munge_preset_map <- function(con, preset) {
   out <- DBI::dbGetQuery(
     con,
-    sprintf("SELECT duckdb_munge_preset_map(%s) AS m", sql_quote_string(con, preset))
+    sprintf("SELECT duckhts__munge_preset_map(%s) AS m", sql_quote_string(con, preset))
   )
   if (nrow(out) != 1 || is.null(out$m[[1]])) {
-    stop("duckdb_munge: unknown preset", call. = FALSE)
+    stop("duckhts_munge: unknown preset", call. = FALSE)
   }
   m <- out$m[[1]]
   if (!is.data.frame(m) || !all(c("key", "value") %in% names(m))) {
-    stop("duckdb_munge: failed to read preset map", call. = FALSE)
+    stop("duckhts_munge: failed to read preset map", call. = FALSE)
   }
   structure(as.character(m$value), names = toupper(as.character(m$key)))
 }

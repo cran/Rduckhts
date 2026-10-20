@@ -64,43 +64,12 @@ duckhts_bootstrap <- function(repo_root = NULL) {
     file.path(dest, "duckhts_sources.tsv"),
     overwrite = TRUE
   )
-
-  duckvep_dest <- file.path(dest, "duckvep")
-  dir.create(duckvep_dest, recursive = TRUE, showWarnings = FALSE)
-  duckvep_headers <- list.files(file.path(src_dir, "duckvep"), pattern = "[.]h$", full.names = TRUE)
-  if (!length(duckvep_headers) || !all(file.copy(duckvep_headers, duckvep_dest))) {
-    stop("Failed to copy DuckVEP adapter headers", call. = FALSE)
+  # The extension sources are MIT-licensed; ship the notice with them, since the
+  # repository-level LICENSE is outside the R package tree.
+  if (!file.copy(file.path(repo_root, "LICENSE"), file.path(dest, "LICENSE"), overwrite = TRUE)) {
+    stop("Failed to copy the DuckHTS extension LICENSE", call. = FALSE)
   }
-  duckvep_kernel_headers <- c("duckvep_kernel.h", "duckvep_so.h")
-  duckvep_kernel_private_headers <- list.files(
-    file.path(src_dir, "duckvep", "kernel", "src"),
-    pattern = "[.](h|inc)$"
-  )
-  duckvep_kernel_dest <- file.path(duckvep_dest, "kernel")
-  dir.create(
-    file.path(duckvep_kernel_dest, "include"),
-    recursive = TRUE,
-    showWarnings = FALSE
-  )
-  dir.create(
-    file.path(duckvep_kernel_dest, "src"),
-    recursive = TRUE,
-    showWarnings = FALSE
-  )
-  file.copy(
-    file.path(src_dir, "duckvep", "kernel", "include", duckvep_kernel_headers),
-    file.path(duckvep_kernel_dest, "include")
-  )
-  file.copy(
-    file.path(
-      src_dir,
-      "duckvep",
-      "kernel",
-      "src",
-      duckvep_kernel_private_headers
-    ),
-    file.path(duckvep_kernel_dest, "src")
-  )
+
   message(
     "  Copied ",
     nrow(source_rows),
@@ -125,6 +94,14 @@ duckhts_bootstrap <- function(repo_root = NULL) {
   )
   variantkey_files <- c("hex.h", "variantkey.h", "regionkey.h")
   file.copy(file.path(variantkey_dir, variantkey_files), variantkey_inc_dest)
+  # The VariantKey headers refer to "LICENSE"; ship it beside them.
+  if (!file.copy(
+    file.path(repo_root, "third_party", "variantkey", "LICENSE"),
+    file.path(variantkey_inc_dest, "LICENSE"),
+    overwrite = TRUE
+  )) {
+    stop("Failed to copy the VariantKey LICENSE", call. = FALSE)
+  }
   message(
     "  Copied ",
     length(inc_files) + 2L + length(variantkey_files),
@@ -162,6 +139,14 @@ duckhts_bootstrap <- function(repo_root = NULL) {
     overwrite = TRUE
   )
   message("  Copied vendored read-only libBigWig sources and test fixture")
+  somalier_sites <- file.path(repo_root, "test", "data", "somalier",
+                              "1000G_3samples.vcf.gz")
+  if (!file.copy(somalier_sites,
+                 file.path(extdata_dest, "somalier_population_1000g.vcf.gz"),
+                 overwrite = TRUE)) {
+    stop("Failed to bundle Somalier population fixture: ", somalier_sites,
+         call. = FALSE)
+  }
 
   # DuckDB C API headers
   capi_dest <- file.path(dest, "duckdb_capi")
@@ -170,6 +155,14 @@ duckhts_bootstrap <- function(repo_root = NULL) {
     file.path(repo_root, "duckdb_capi", c("duckdb.h", "duckdb_extension.h")),
     capi_dest
   )
+  # The DuckDB headers carry no per-file notice; ship DuckDB's MIT licence.
+  if (!file.copy(
+    file.path(repo_root, "duckdb_capi", "LICENSE"),
+    file.path(capi_dest, "LICENSE"),
+    overwrite = TRUE
+  )) {
+    stop("Failed to copy the DuckDB LICENSE", call. = FALSE)
+  }
   message("  Copied DuckDB C API headers")
 
   # Apply local patch(es) to C API headers for R package only

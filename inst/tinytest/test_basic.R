@@ -20,6 +20,7 @@ expect_true(exists("rduckhts_bcf_index"))
 expect_true(exists("rduckhts_bgzip"))
 expect_true(exists("rduckhts_bgunzip"))
 expect_true(exists("rduckhts_bam_bin_counts"))
+expect_true(exists("rduckhts_bam_mismatch_counts"))
 expect_true(exists("rduckhts_bam_bed_coverage"))
 expect_true(exists("rduckhts_mosdepth"))
 expect_true(exists("rduckhts_samtools_idxstats"))
@@ -69,7 +70,9 @@ expect_identical(
     "decompression_threads",
     "decode_error_policy",
     "overwrite",
-    "samples"
+    "samples",
+    "regions_var",
+    "include_file_offset" # opt-in FILE_OFFSET column of read_bcf()
   )
 )
 expect_identical(
@@ -255,7 +258,8 @@ expect_identical(
     "attributes_list",
     "attributes_pairs",
     "strict",
-    "overwrite"
+    "overwrite",
+    "attributes"
   )
 )
 expect_identical(
@@ -274,7 +278,8 @@ expect_identical(
     "attributes_map",
     "attributes_list",
     "attributes_pairs",
-    "overwrite"
+    "overwrite",
+    "attributes"
   )
 )
 expect_identical(
@@ -537,24 +542,6 @@ expect_true(file.exists(system.file(
   package = "Rduckhts"
 )))
 
-# The installed rebuild path and package bootstrap share one DuckVEP source
-# inventory. Every listed source must be present in the bundled tree.
-duckvep_kernel_sources <- getFromNamespace(
-  "duckhts_duckvep_kernel_source_files",
-  "Rduckhts"
-)()
-expect_true(length(duckvep_kernel_sources) > 0L)
-expect_true(all(file.exists(file.path(
-  system.file(
-    "duckhts_extension",
-    "duckvep",
-    "kernel",
-    "src",
-    package = "Rduckhts"
-  ),
-  duckvep_kernel_sources
-))))
-
 catalog <- rduckhts_functions()
 expect_true(is.data.frame(catalog))
 expect_identical(
@@ -588,7 +575,7 @@ expect_true("duckhts_cgranges_has_overlap" %in% catalog$name)
 expect_true("duckhts_cgranges_count_overlaps" %in% catalog$name)
 expect_true("duckhts_cgranges_overlaps" %in% catalog$name)
 expect_true("bcftools_liftover" %in% catalog$name)
-expect_true("duckdb_liftover" %in% catalog$name)
+expect_true("duckhts_liftover" %in% catalog$name)
 expect_true("bcftools_norm_row" %in% catalog$name)
 expect_true("duckhts_bcftools_norm" %in% catalog$name)
 expect_equal(unique(rduckhts_functions(kind = "scalar")$kind), "scalar")
@@ -600,6 +587,84 @@ expect_equal(
   unique(rduckhts_functions(category = "CIGAR Utils")$category),
   "CIGAR Utils"
 )
+
+# Catalog kinds and parameters must match the loaded extension. For each entry, at
+# least one registered overload must match the documented signature on its own:
+# scalar and aggregate functions by every documented arity (or variable arguments), native
+# table functions by positional count and exact named options, and macros by every
+# argument name in order.
+local({
+  con <- rduckhts_connect()
+  on.exit(DBI::dbDisconnect(con, shutdown = TRUE))
+  registered <- DBI::dbGetQuery(con, paste(
+    "SELECT function_name, function_type, parameters, varargs",
+    "FROM duckdb_functions()"
+  ))
+  # Split a signature's top-level arguments, ignoring commas inside brackets or quotes.
+  signature_args <- function(signature) {
+    inner <- sub("^[^(]*\\((.*)\\)[[:space:]]*$", "\\1", signature)
+    chars <- strsplit(inner, "")[[1L]]
+    args <- character()
+    depth <- 0L
+    quote <- ""
+    start <- 1L
+    for (k in seq_along(chars)) {
+      ch <- chars[[k]]
+      if (nzchar(quote)) {
+        if (ch == quote) quote <- ""
+      } else if (ch %in% c("'", "\"")) {
+        quote <- ch
+      } else if (ch %in% c("(", "[", "{")) {
+        depth <- depth + 1L
+      } else if (ch %in% c(")", "]", "}")) {
+        depth <- depth - 1L
+      } else if (ch == "," && depth == 0L) {
+        args <- c(args, paste(chars[start:(k - 1L)], collapse = ""))
+        start <- k + 1L
+      }
+    }
+    if (start <= length(chars)) args <- c(args, paste(chars[start:length(chars)], collapse = ""))
+    args <- trimws(args)
+    args <- args[nzchar(args)]
+    data.frame(name = trimws(sub(":=.*", "", args)), named = grepl(":=", args, fixed = TRUE))
+  }
+  kinds <- c(scalar_macro = "macro", table_macro = "table_macro")
+  for (i in seq_len(nrow(catalog))) {
+    entry <- catalog[i, ]
+    kind <- if (entry$kind %in% names(kinds)) kinds[[entry$kind]] else entry$kind
+    found <- registered[
+      registered$function_name == entry$name & registered$function_type == kind,
+      , drop = FALSE
+    ]
+    expect_true(nrow(found) > 0L, info = entry$name)
+    if (!nrow(found)) next
+    documented <- signature_args(entry$signature)
+    if (entry$kind %in% c("scalar", "aggregate")) {
+      # `[, name]` marks an optional trailing argument: every arity from the
+      # required count up to the full count needs its own overload (or varargs).
+      optional <- lengths(regmatches(entry$signature,
+                                     gregexpr("\\[[[:space:]]*,", entry$signature)))
+      arities <- nrow(documented) + seq.int(0L, optional)
+      counts <- lengths(found$parameters)
+      varargs <- any(!is.na(found$varargs))
+      for (arity in arities) {
+        expect_true(varargs || arity %in% counts, info = paste(entry$name, "arity", arity))
+      }
+      next
+    }
+    matches <- vapply(seq_len(nrow(found)), function(j) {
+      params <- as.character(found$parameters[[j]])
+      if (entry$kind == "table") {
+        positional <- grepl("^col[0-9]+$", params)
+        sum(positional) == sum(!documented$named) &&
+          setequal(params[!positional], documented$name[documented$named])
+      } else {
+        identical(params, documented$name)
+      }
+    }, logical(1))
+    expect_true(any(matches), info = entry$name)
+  }
+})
 
 # Test parameter validation - these should fail gracefully without a connection
 expect_error(rduckhts_bcf(NULL, "test", "nonexistent.vcf"))

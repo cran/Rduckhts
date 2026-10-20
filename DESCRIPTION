@@ -1,45 +1,71 @@
 Package: Rduckhts
 Title: 'DuckDB' High Throughput Sequencing File Formats Reader
         Extension
-Version: 1.5.2-0.1.5
+Version: 2.0.0.0.1.9
 Authors@R: c(
     person(given = "Sounkou Mahamane", family = "Toure",
     email = "sounkoutoure@gmail.com",
     role = c("aut", "cre")),
+    person(given = "Ryan", family = "Ward",
+    email = "ryan@nurture.bio",
+    role = "aut", comment = "GenBank reader and FASTA converter"),
+    person("Nurture Bio", role = "cph", comment = "GenBank reader and FASTA converter"),
     person(given = "James K Bonfield, John Marshall,Petr Danecek ,Heng Li , Valeriu Ohan, Andrew Whitwham,Thomas Keane , Robert M Davies", role = "ctb", comment = "Htslib Authors"),
+    person("DuckHTS Contributors", role = "cph", comment = "DuckHTS DuckDB extension (MIT)"),
+    person("RBCFTools Authors", role = "cph", comment = "Copyright notice in bcf_reader.c"),
+    person("Genome Research Ltd", role = "cph", comment = "HTSlib, htscodecs and the bcftools filter engine (Petr Danecek)"),
+    person("Broad Institute", role = "cph", comment = "Portions of HTSlib"),
+    person("Massachusetts Institute of Technology", role = "cph", comment = "Portions of HTSlib"),
+    person("Medical Research Council", role = "cph", comment = "Portions of HTSlib CRAM code"),
+    person("Attractive Chaos", role = "cph", comment = "khash, kseq and related HTSlib and cgranges headers"),
+    person("Dana-Farber Cancer Institute", role = "cph", comment = "cgranges"),
     person(given = "Brent", family = "Pedersen", role = "cph", comment = "Original author of mosdepth and Somalier"),
     person(given = "Giulio", family = "Genovese", email = "giulio.genovese@gmail.com", role = "cph", comment = "Author of BCFTools munge,score,liftover plugins"),
+    person("GENOMICS plc", role = "cph", comment = "VariantKey and RegionKey C API"),
     person(given = "Nicola", family = "Asuni", role = "cph", comment = "Author of the VariantKey and RegionKey C API"),
     person(given = "Devon", family = "Ryan", role = "cph", comment = "Author of libBigWig"),
-    person(given = "DuckDB C Extension API Authors", role = "ctb")
+    person("Stichting DuckDB Foundation", role = "cph", comment = "DuckDB C extension API headers")
     )
 Description: Bundles the 'duckhts' 'DuckDB' extension for reading High Throughput
     Sequencing file formats with 'DuckDB'. The 'DuckDB' C extension API
     <https://duckdb.org/docs/stable/clients/c/api> and its 'htslib' dependency are
     compiled from vendored sources during package installation. James K Bonfield and co-authors (2021) <doi:10.1093/gigascience/giab007>. VariantKey / RegionKey support follows Nicola Asuni (2018) <doi:10.1101/473744>.
-License: GPL-3
+License: GPL (>= 2)
 Copyright: See inst/COPYRIGHT
 Encoding: UTF-8
 SystemRequirements: GNU make, cmake, zlib, libbz2, liblzma, libcurl,
         openssl (development headers)
 NeedsCompilation: yes
 Depends: R (>= 4.4.0)
-Imports: DBI, duckdb, methods, utils
+Imports: DBI, duckdb (>= 1.5.0), methods, utils
 Suggests: Rtinycc, tinytest
 URL: https://github.com/RGenomicsETL/duckhts,
         https://rgenomicsetl.r-universe.dev/Rduckhts
 BugReports: https://github.com/RGenomicsETL/duckhts/issues
 Config/roxygen2/version: 8.0.0
-Packaged: 2026-09-16 10:09:00 UTC; root
+Packaged: 2026-10-20 08:57:00 UTC; root
 Author: Sounkou Mahamane Toure [aut, cre],
+  Ryan Ward [aut] (GenBank reader and FASTA converter),
+  Nurture Bio [cph] (GenBank reader and FASTA converter),
   James K Bonfield, John Marshall,Petr Danecek ,Heng Li , Valeriu Ohan,
     Andrew Whitwham,Thomas Keane , Robert M Davies [ctb] (Htslib
     Authors),
+  DuckHTS Contributors [cph] (DuckHTS DuckDB extension (MIT)),
+  RBCFTools Authors [cph] (Copyright notice in bcf_reader.c),
+  Genome Research Ltd [cph] (HTSlib, htscodecs and the bcftools filter
+    engine (Petr Danecek)),
+  Broad Institute [cph] (Portions of HTSlib),
+  Massachusetts Institute of Technology [cph] (Portions of HTSlib),
+  Medical Research Council [cph] (Portions of HTSlib CRAM code),
+  Attractive Chaos [cph] (khash, kseq and related HTSlib and cgranges
+    headers),
+  Dana-Farber Cancer Institute [cph] (cgranges),
   Brent Pedersen [cph] (Original author of mosdepth and Somalier),
   Giulio Genovese [cph] (Author of BCFTools munge,score,liftover plugins),
+  GENOMICS plc [cph] (VariantKey and RegionKey C API),
   Nicola Asuni [cph] (Author of the VariantKey and RegionKey C API),
   Devon Ryan [cph] (Author of libBigWig),
-  DuckDB C Extension API Authors [ctb]
+  Stichting DuckDB Foundation [cph] (DuckDB C extension API headers)
 Maintainer: Sounkou Mahamane Toure <sounkoutoure@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-09-16 12:20:19 UTC
+Date/Publication: 2026-10-20 10:00:02 UTC

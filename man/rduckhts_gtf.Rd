@@ -18,7 +18,8 @@ rduckhts_gtf(
   attributes_map = FALSE,
   attributes_list = FALSE,
   attributes_pairs = FALSE,
-  overwrite = FALSE
+  overwrite = FALSE,
+  attributes = NULL
 )
 }
 \arguments{
@@ -52,6 +53,10 @@ instead of index-backed count paths. Sequential mode is incompatible with
 \item{attributes_pairs}{Logical. If TRUE, returns attributes as a LIST of key/value/index structs}
 
 \item{overwrite}{Logical. If TRUE, overwrites existing table}
+
+\item{attributes}{Character vector of attribute keys to expose as VARCHAR
+columns. Key matching is case-sensitive: \code{"id"} does not match
+\code{ID}, and an unmatched key gives a column of \code{NA}}
 }
 \value{
 Invisible TRUE on success

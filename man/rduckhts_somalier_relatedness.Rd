@@ -11,6 +11,7 @@ rduckhts_somalier_relatedness(
   pairs_table = NULL,
   table_name = NULL,
   max_sites = 1e+06,
+  max_pairs = 5e+07,
   overwrite = FALSE
 )
 }
@@ -30,6 +31,10 @@ should be used only for a result small enough to fit in R memory.}
 
 \item{max_sites}{Positive per-pair panel capacity, at most 100,000,000.}
 
+\item{max_pairs}{Positive cap on the number of pairs when `pairs_table` is
+`NULL`. A sketch relation of N samples has N(N-1)/2 pairs; more pairs
+than `max_pairs` is an error before any pair is compared.}
+
 \item{overwrite}{Whether an existing output table may be replaced.}
 }
 \value{
@@ -43,5 +48,7 @@ Selected pairs are an ordinary relation with `sample_a` and `sample_b`
 columns. Missing or duplicate sample and pair identities error instead of
 silently dropping or multiplying requested comparisons. The native kernel
 checks assembly, ordered-panel digest, classification settings, mask shape,
-and mask contents for each comparison. No SQL row-order guarantee is implied.
+and mask contents. For all pairs it checks the contents of each sketch once
+and then compares the checked sketches; for selected pairs it checks both
+sketches of each comparison. No SQL row-order guarantee is implied.
 }

@@ -2,10 +2,14 @@
 #'
 #' Convert an existing Somalier-compatible sites file into the canonical typed
 #' panel and population-frequency relation used by DuckHTS extraction,
-#' relatedness, and contamination functions. REF and ALT are oriented into
+#' relatedness, contamination, and sex functions. REF and ALT are oriented into
 #' lexical A/B order and alternate-allele frequency is flipped with the alleles,
-#' so `population_b_af` always describes `allele_b`. Exact Somalier v0.3.4 X/Y
-#' aliases are excluded, matching its autosomal frequency importer.
+#' so `population_b_af` always describes `allele_b`. Records on the exact
+#' Somalier v0.3.4 X/Y aliases are kept as sex-chromosome sites, numbered after
+#' every autosomal site; relatedness and contamination functions ignore them
+#' and `rduckhts_somalier_sex()` reads them. No pseudo-autosomal filtering
+#' happens on import or extraction, as in Somalier: select X sites outside the
+#' PAR when choosing the sites file. At least one autosomal record is required.
 #'
 #' This function does not select sites from a population VCF. Somalier's
 #' `find-sites` algorithm has separate AF/AN, QC, interval-exclusion, and spacing
@@ -25,7 +29,7 @@ rduckhts_somalier_import_sites <- function(
   con, path, assembly, max_sites = 1000000,
   table_name = NULL, overwrite = FALSE
 ) {
-  .somalier_validate_output(table_name, overwrite)
+  .somalier_validate_output(con, table_name, overwrite)
   .somalier_scalar_text(path, "path")
   .somalier_scalar_text(assembly, "assembly")
   if (nchar(assembly, type = "bytes") > 1024L) {
@@ -46,7 +50,7 @@ rduckhts_somalier_import_sites <- function(
 #' Extract Panel-Aligned Counts from VCF or BCF
 #'
 #' Produce the complete sample-by-panel count relation consumed by the
-#' Somalier-derived relatedness and contamination functions. `FORMAT/AD` must
+#' Somalier-derived relatedness, contamination and sex functions. `FORMAT/AD` must
 #' declare `Number=R,Type=Integer`; A and B slots are matched by exact REF/ALT
 #' identity, and `other` sums only the remaining declared-allele slots. Missing
 #' sites and unavailable AD remain rows with three NULL counts, distinct from
@@ -61,7 +65,8 @@ rduckhts_somalier_import_sites <- function(
 #'   leading `^` exclusion, `"-"` for all, or `""` for none.
 #' @param filter_policy Record FILTER policy: `"pass_or_unapplied"` makes named
 #'   failures unavailable, `"include_all"` uses their AD, and `"error"` rejects
-#'   a selected panel record with a named failure.
+#'   a selected panel record with a named failure. X/Y sites ignore the policy
+#'   and always use their AD, as Somalier extraction does.
 #' @param table_name Optional output table. `NULL` returns a data frame.
 #' @param overwrite Whether an existing output table may be replaced.
 #' @return A data frame if `table_name` is `NULL`; otherwise invisible `TRUE`.
@@ -71,7 +76,7 @@ rduckhts_somalier_vcf_counts <- function(
   filter_policy = c("pass_or_unapplied", "include_all", "error"),
   table_name = NULL, overwrite = FALSE
 ) {
-  .somalier_validate_output(table_name, overwrite)
+  .somalier_validate_output(con, table_name, overwrite)
   .somalier_scalar_text(path, "path")
   if (!is.null(samples)) .somalier_scalar_text(samples, "samples", allow_empty = TRUE)
   filter_policy <- match.arg(filter_policy)
@@ -102,18 +107,19 @@ rduckhts_somalier_vcf_counts <- function(
 #' `decompression_threads` separately controls htslib decompression workers per
 #' source handle.
 #' Valid uncovered sites are measured zero depth; reference or alignment-header
-#' mismatches remain rows with NULL counts and a named status. The panel can be
-#' a committed table/view or an ordinary Parquet file. Caller-local temporary
-#' relations and uncommitted changes are not visible during panel preparation.
-#' One retained-connection preparation slot is shared by concurrent calls;
-#' nested or concurrent preparation errors and callers may retry.
+#' mismatches remain rows with NULL counts and a named status. The native
+#' function reads the panel from a local Parquet file on a private in-memory
+#' instance. A panel table or view is therefore written to a scratch Parquet
+#' file for the call, which also makes caller-local temporary relations and
+#' uncommitted rows visible.
 #'
 #' @param con A DuckDB connection with DuckHTS loaded.
 #' @param source_path One indexed BAM/CRAM path or URI.
 #' @param sample_id Nonempty sample identity assigned to the extracted rows.
 #' @param reference_path Reference FASTA matching the panel and alignments.
-#' @param panel_table Name of a committed ordered panel table or view.
-#' @param panel_parquet Ordinary panel Parquet path, instead of `panel_table`.
+#' @param panel_table Name of an ordered panel table or view visible to `con`.
+#' @param panel_parquet Local ordinary panel Parquet path, instead of
+#'   `panel_table`.
 #' @param index_path Optional explicit BAM/CRAM index path.
 #' @param reference_index_path Optional explicit FASTA index path.
 #' @param min_mapq Minimum alignment mapping quality.
@@ -151,7 +157,7 @@ rduckhts_somalier_bam_counts <- function(
   remote_cache_bytes = 67108864, reference_cache_bytes = 67108864,
   table_name = NULL, overwrite = FALSE
 ) {
-  .somalier_validate_output(table_name, overwrite)
+  .somalier_validate_output(con, table_name, overwrite)
   .somalier_scalar_text(source_path, "source_path")
   .somalier_scalar_text(sample_id, "sample_id")
   .somalier_scalar_text(reference_path, "reference_path")
@@ -205,16 +211,24 @@ rduckhts_somalier_bam_counts <- function(
   }
   if (!is.null(panel_table)) {
     .somalier_validate_name(panel_table, "panel_table")
+    panel_parquet <- tempfile("rduckhts_somalier_panel_", fileext = ".parquet")
+    on.exit(unlink(panel_parquet), add = TRUE)
+    DBI::dbExecute(con, sprintf(
+      paste0(
+        "COPY (SELECT assembly, site_index, region, position, allele_a, ",
+        "allele_b FROM %s) TO %s (FORMAT parquet)"
+      ),
+      sql_quote_identifier(con, panel_table),
+      sql_quote_string(con, normalizePath(panel_parquet, winslash = "/",
+                                          mustWork = FALSE))
+    ))
   } else {
     .somalier_validate_name(panel_parquet, "panel_parquet")
   }
   arguments <- c(
-    sql_quote_string(con, source_path),
-    if (is.null(panel_table)) "NULL" else sql_quote_string(con, panel_table),
+    sql_quote_string(con, source_path), "NULL",
     sql_quote_string(con, sample_id), sql_quote_string(con, reference_path),
-    if (!is.null(panel_parquet)) {
-      paste0("panel_parquet := ", sql_quote_string(con, panel_parquet))
-    },
+    paste0("panel_parquet := ", sql_quote_string(con, panel_parquet)),
     if (!is.null(index_path)) {
       paste0("index_path := ", sql_quote_string(con, index_path))
     },
@@ -256,8 +270,10 @@ rduckhts_somalier_bam_counts <- function(
 #' are NULL for unavailable evidence; three measured zeros are not unavailable.
 #' The native SQL preparation checks every evidence site's geometry and A/B
 #' orientation against the ordered panel before computing its digest. Panel
-#' alleles must be distinct uppercase single-base A/C/G/T with lexical A < B;
-#' the exact X/Y aliases excluded by Somalier v0.3.4 are rejected. Other
+#' alleles must be distinct uppercase single-base A/C/G/T with lexical A < B.
+#' Rows on the exact Somalier v0.3.4 X/Y aliases are sex-chromosome sites that
+#' must follow every autosomal site in `site_index`; they and their evidence are
+#' ignored here, so results equal those on the autosomal-only panel. Other
 #' contig aliases cannot be classified biologically from the region string.
 #' The three-state calculation assumes diploid sites; count evidence alone
 #' does not prove sample ploidy.
@@ -292,7 +308,7 @@ rduckhts_somalier_sketches <- function(
   sample_ids = NULL, min_depth = 7, min_het_balance = 0.3,
   hom_balance_cutoff = 0.01, max_sites = 1000000, overwrite = FALSE
 ) {
-  .somalier_validate_output(table_name, overwrite)
+  .somalier_validate_output(con, table_name, overwrite)
   min_depth <- .somalier_whole_number(min_depth, "min_depth", 2^53)
   max_sites <- .somalier_whole_number(max_sites, "max_sites", 100000000)
   min_het_balance <- .somalier_fraction(min_het_balance, "min_het_balance")
@@ -336,7 +352,9 @@ rduckhts_somalier_sketches <- function(
 #' columns. Missing or duplicate sample and pair identities error instead of
 #' silently dropping or multiplying requested comparisons. The native kernel
 #' checks assembly, ordered-panel digest, classification settings, mask shape,
-#' and mask contents for each comparison. No SQL row-order guarantee is implied.
+#' and mask contents. For all pairs it checks the contents of each sketch once
+#' and then compares the checked sketches; for selected pairs it checks both
+#' sketches of each comparison. No SQL row-order guarantee is implied.
 #'
 #' @param con A DuckDB connection with DuckHTS loaded.
 #' @param sketches_table Name of a prepared sketch table or view.
@@ -347,16 +365,20 @@ rduckhts_somalier_sketches <- function(
 #' @param table_name Optional output table. `NULL` returns a data frame, which
 #'   should be used only for a result small enough to fit in R memory.
 #' @param max_sites Positive per-pair panel capacity, at most 100,000,000.
+#' @param max_pairs Positive cap on the number of pairs when `pairs_table` is
+#'   `NULL`. A sketch relation of N samples has N(N-1)/2 pairs; more pairs
+#'   than `max_pairs` is an error before any pair is compared.
 #' @param overwrite Whether an existing output table may be replaced.
 #' @return A data frame if `table_name` is `NULL`; otherwise invisible `TRUE`.
 #' @export
 rduckhts_somalier_relatedness <- function(
   con, sketches_table = NULL, sketches_parquet = NULL,
   pairs_table = NULL, table_name = NULL, max_sites = 1000000,
-  overwrite = FALSE
+  max_pairs = 50000000, overwrite = FALSE
 ) {
-  .somalier_validate_output(table_name, overwrite)
+  .somalier_validate_output(con, table_name, overwrite)
   max_sites <- .somalier_whole_number(max_sites, "max_sites", 100000000)
+  max_pairs <- .somalier_whole_number(max_pairs, "max_pairs", 2^53)
   if (!is.null(pairs_table)) {
     .somalier_validate_name(pairs_table, "pairs_table")
   }
@@ -377,9 +399,12 @@ rduckhts_somalier_relatedness <- function(
   }
 
   if (is.null(pairs_table)) {
-    from_sql <- sprintf(
-      "FROM %s a JOIN %s b ON a.sketch.sample_id < b.sketch.sample_id",
-      sketch_relation, sketch_relation
+    query <- sprintf(
+      paste0("SELECT * FROM duckhts_somalier_relatedness_all_pairs(%s, ",
+             "max_sites := %s, max_pairs := %s)"),
+      sql_quote_string(con, sketches$name),
+      .somalier_quote_number(con, max_sites),
+      .somalier_quote_number(con, max_pairs)
     )
   } else {
     pair_relation <- sql_quote_identifier(con, pairs_table)
@@ -404,11 +429,11 @@ rduckhts_somalier_relatedness <- function(
              "JOIN %s b ON b.sketch.sample_id = p.sample_b"),
       pair_relation, sketch_relation, sketch_relation
     )
+    query <- sprintf(
+      "SELECT unnest(duckhts_somalier_relatedness(a.sketch, b.sketch, %s)) %s",
+      .somalier_quote_number(con, max_sites), from_sql
+    )
   }
-  query <- sprintf(
-    "SELECT unnest(duckhts_somalier_relatedness(a.sketch, b.sketch, %s)) %s",
-    .somalier_quote_number(con, max_sites), from_sql
-  )
   .somalier_publish_query(con, query, table_name, overwrite)
 }
 
@@ -451,7 +476,7 @@ rduckhts_somalier_charr <- function(
   max_depth = 1000000, hom_minor_rate = 0.12, hom_tail_alpha = 0.002,
   max_threshold_work = 16000000, max_sites = 1000000, overwrite = FALSE
 ) {
-  .somalier_validate_output(table_name, overwrite)
+  .somalier_validate_output(con, table_name, overwrite)
   min_depth <- .somalier_whole_number(min_depth, "min_depth", 1000000)
   max_depth <- .somalier_whole_number(max_depth, "max_depth", 1000000)
   max_threshold_work <- .somalier_whole_number(
@@ -503,6 +528,111 @@ rduckhts_somalier_charr <- function(
   .somalier_publish_query(con, query, table_name, overwrite)
 }
 
+#' Infer X/Y Dosage Sex Evidence
+#'
+#' Report, per sample, the X and Y depth relative to autosomal depth, the
+#' heterozygous and homozygous-alternate counts of usable X sites, and a call
+#' of `"XX"`, `"XY"` or `"ambiguous"` following Somalier v0.3.4
+#' (`relate.nim`). The counts relation comes from
+#' `rduckhts_somalier_vcf_counts()` or `rduckhts_somalier_bam_counts()` over a
+#' panel that includes X/Y sites (see `rduckhts_somalier_import_sites()`); every
+#' selected sample needs one row for every panel site.
+#'
+#' Depth ratios are `2 * mean A+B depth over usable sites / autosomal mean
+#' depth`, with the autosomal mean taken over sites passing the relatedness
+#' allele-balance gate. The call is `"XY"` when at least `min_usable_x_sites`
+#' X sites are usable and their het/hom-alt ratio is below `xy_max_het_ratio`,
+#' `"XX"` when it exceeds `xx_min_het_ratio`, and otherwise `"ambiguous"`;
+#' an XX dosage with a present Y signal is also `"ambiguous"`. Metrics are
+#' `NA` without usable sites or autosomal depth, with a `status` naming why.
+#' The call is evidence for review, not a diagnosis or determination of sex.
+#'
+#' Somalier applies its Y check only when the cohort has Y depth, which makes a
+#' sample's call depend on the rest of the batch. `y_gate = "sample"` (the
+#' default) applies it whenever the sample has a Y signal; `"cohort"` reproduces
+#' Somalier's gate, computed among the selected samples, and `cohort_has_y`
+#' reports it.
+#'
+#' @inheritParams rduckhts_somalier_sketches
+#' @param counts_table Name of a count relation table or view.
+#' @param counts_parquet Path to a count relation Parquet file, instead of
+#'   `counts_table`.
+#' @param min_depth Minimum A+B depth of an autosomal site in the normaliser.
+#' @param min_sex_site_depth Minimum A+B depth of a usable X or Y site.
+#' @param min_het_balance Lower B balance accepted as heterozygous.
+#' @param hom_balance_cutoff B balance below which a site is homozygous A.
+#' @param min_usable_x_sites Usable X sites required for an XX or XY call.
+#' @param xy_max_het_ratio,xx_min_het_ratio X het/hom-alt ratio limits for XY
+#'   (below) and XX (above), with `xy_max_het_ratio <= xx_min_het_ratio`.
+#' @param y_signal_min Y depth ratio above which the Y signal is present.
+#' @param y_gate Either `"sample"` or `"cohort"`.
+#' @return A data frame if `table_name` is `NULL`; otherwise invisible `TRUE`.
+#' @export
+rduckhts_somalier_sex <- function(
+  con, counts_table = NULL, counts_parquet = NULL,
+  panel_table = NULL, panel_parquet = NULL, table_name = NULL,
+  sample_ids = NULL, min_depth = 7, min_sex_site_depth = 7,
+  min_het_balance = 0.3, hom_balance_cutoff = 0.01, min_usable_x_sites = 11,
+  xy_max_het_ratio = 0.05, xx_min_het_ratio = 0.4, y_signal_min = 0.4,
+  y_gate = c("sample", "cohort"), overwrite = FALSE
+) {
+  .somalier_validate_output(con, table_name, overwrite)
+  min_depth <- .somalier_whole_number(min_depth, "min_depth", 4294967295)
+  min_sex_site_depth <- .somalier_whole_number(
+    min_sex_site_depth, "min_sex_site_depth", 4294967295
+  )
+  min_usable_x_sites <- .somalier_whole_number(
+    min_usable_x_sites, "min_usable_x_sites", 100000000
+  )
+  min_het_balance <- .somalier_open_fraction(
+    min_het_balance, "min_het_balance", upper = 0.5, include_upper = TRUE
+  )
+  hom_balance_cutoff <- .somalier_fraction(hom_balance_cutoff, "hom_balance_cutoff")
+  if (hom_balance_cutoff > min_het_balance) {
+    stop("hom_balance_cutoff must not exceed min_het_balance", call. = FALSE)
+  }
+  xy_max_het_ratio <- .somalier_nonnegative_number(xy_max_het_ratio, "xy_max_het_ratio")
+  xx_min_het_ratio <- .somalier_nonnegative_number(xx_min_het_ratio, "xx_min_het_ratio")
+  y_signal_min <- .somalier_nonnegative_number(y_signal_min, "y_signal_min")
+  if (xy_max_het_ratio > xx_min_het_ratio) {
+    stop("xy_max_het_ratio must not exceed xx_min_het_ratio", call. = FALSE)
+  }
+  y_gate <- match.arg(y_gate)
+  .somalier_validate_sample_ids(sample_ids)
+
+  counts <- .somalier_source(con, counts_table, counts_parquet, "counts")
+  if (counts$temporary) {
+    on.exit(.somalier_drop_view(con, counts$name), add = TRUE, after = FALSE)
+  }
+  panel <- .somalier_source(con, panel_table, panel_parquet, "panel")
+  if (panel$temporary) {
+    on.exit(.somalier_drop_view(con, panel$name), add = TRUE, after = FALSE)
+  }
+  counts$name <- .somalier_select_samples(con, counts$name, sample_ids)
+  if (!is.null(sample_ids)) {
+    on.exit(.somalier_drop_view(con, counts$name), add = TRUE, after = FALSE)
+  }
+
+  query <- sprintf(
+    paste0("SELECT * FROM duckhts_somalier_sex(%s, %s, min_depth := %s, ",
+           "min_sex_site_depth := %s, min_het_balance := %s, ",
+           "hom_balance_cutoff := %s, min_usable_x_sites := %s, ",
+           "xy_max_het_ratio := %s, xx_min_het_ratio := %s, ",
+           "y_signal_min := %s, y_gate := %s)"),
+    sql_quote_string(con, counts$name), sql_quote_string(con, panel$name),
+    .somalier_quote_number(con, min_depth),
+    .somalier_quote_number(con, min_sex_site_depth),
+    .somalier_quote_number(con, min_het_balance),
+    .somalier_quote_number(con, hom_balance_cutoff),
+    .somalier_quote_number(con, min_usable_x_sites),
+    .somalier_quote_number(con, xy_max_het_ratio),
+    .somalier_quote_number(con, xx_min_het_ratio),
+    .somalier_quote_number(con, y_signal_min),
+    sql_quote_string(con, y_gate)
+  )
+  .somalier_publish_query(con, query, table_name, overwrite)
+}
+
 #' Estimate Directional Contamination Against Matched Anchors
 #'
 #' Estimate one contamination fraction for each explicitly ordered
@@ -548,7 +678,7 @@ rduckhts_somalier_matched_contamination <- function(
   refine_tolerance = 1e-10, max_evaluations = 4096,
   max_threshold_work = 16000000, max_sites = 1000000, overwrite = FALSE
 ) {
-  .somalier_validate_output(table_name, overwrite)
+  .somalier_validate_output(con, table_name, overwrite)
   min_depth <- .somalier_whole_number(min_depth, "min_depth", 1000000)
   max_depth <- .somalier_whole_number(max_depth, "max_depth", 1000000)
   max_evaluations <- .somalier_whole_number(
@@ -646,11 +776,12 @@ rduckhts_somalier_matched_contamination <- function(
   invisible(value)
 }
 
-.somalier_validate_output <- function(table_name, overwrite) {
+.somalier_validate_output <- function(con, table_name, overwrite) {
   if (!is.null(table_name)) .somalier_validate_name(table_name, "table_name")
   if (!is.logical(overwrite) || length(overwrite) != 1L || is.na(overwrite)) {
     stop("overwrite must be TRUE or FALSE", call. = FALSE)
   }
+  .duckhts_check_table_target(con, table_name, overwrite)
   invisible(TRUE)
 }
 
@@ -702,6 +833,13 @@ rduckhts_somalier_matched_contamination <- function(
   if (!is.numeric(value) || length(value) != 1L || !is.finite(value) ||
       value < 0 || value >= upper) {
     stop(name, " must be one finite number in [0, ", upper, ")", call. = FALSE)
+  }
+  value
+}
+
+.somalier_nonnegative_number <- function(value, name) {
+  if (!is.numeric(value) || length(value) != 1L || !is.finite(value) || value < 0) {
+    stop(name, " must be one non-negative finite number", call. = FALSE)
   }
   value
 }
@@ -781,7 +919,6 @@ rduckhts_somalier_matched_contamination <- function(
 
 .somalier_publish_query <- function(con, query, table_name, overwrite) {
   if (is.null(table_name)) return(DBI::dbGetQuery(con, query))
-  prefix <- if (overwrite) "CREATE OR REPLACE TABLE " else "CREATE TABLE "
-  DBI::dbExecute(con, paste0(prefix, sql_quote_identifier(con, table_name), " AS ", query))
+  .duckhts_create_table(con, table_name, query, overwrite)
   invisible(TRUE)
 }

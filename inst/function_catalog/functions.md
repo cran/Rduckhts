@@ -2,6 +2,12 @@
 
 This section is generated from `functions.yaml`.
 
+### Utilities
+
+| Function | Kind | R helper | Description |
+| --- | --- | --- | --- |
+| [`duckhts_macro_definitions`](reference.md#duckhts_macro_definitions) | table |  | Export the ordered DuckHTS macro definitions for connection-local installation. |
+
 ### Diagnostics
 
 | Function | Kind | R helper | Description |
@@ -21,40 +27,22 @@ This section is generated from `functions.yaml`.
 | [`duckhts_duckdb_supports_variant`](reference.md#duckhts_duckdb_supports_variant) | scalar_macro |  | Return whether the currently open DuckDB runtime advertises the VARIANT logical type. Use this to gate optional SQL that depends on DuckDB VARIANT support. |
 | [`duckhts_duckdb_supports_geometry`](reference.md#duckhts_duckdb_supports_geometry) | scalar_macro |  | Return whether the currently open DuckDB runtime advertises the GEOMETRY logical type. Use this to gate optional SQL that depends on DuckDB GEOMETRY support. |
 
-### Variant Annotation
-
-| Function | Kind | R helper | Description |
-| --- | --- | --- | --- |
-| [`duckvep_ensembl_regions`](reference.md#duckvep_ensembl_regions) | table_macro |  | Match tiled FASTA sequence to one Ensembl core assembly and assign dense model-local sequence-region ordinals. |
-| [`duckvep_ensembl_transcripts`](reference.md#duckvep_ensembl_transcripts) | table_macro |  | Build validated VEP-116 Ensembl core transcript models from core tables and matching tiled FASTA sequence. |
-| [`duckvep_ensembl_regulation_features`](reference.md#duckvep_ensembl_regulation_features) | table_macro |  | Prepare VEP-116 RegulatoryFeature and MotifFeature intervals for a DuckVEP model. |
-| [`duckvep_model_receipt`](reference.md#duckvep_model_receipt) | table_macro |  | Create a deterministic provenance receipt and semantic hash for prepared DuckVEP model relations. |
-| [`duckvep_model_load`](reference.md#duckvep_model_load) | table |  | Load a validated immutable consequence model under a name in the current DuckDB database; return one TRUE row. |
-| [`duckvep_model_drop`](reference.md#duckvep_model_drop) | scalar |  | Remove a named resident DuckVEP consequence model and release its transcript and regulation-feature interval indexes, sequences, and cached worker state. Returns FALSE when the name is absent or the model is in use by an annotation vector. |
-| [`duckvep_allele_geometry`](reference.md#duckvep_allele_geometry) | scalar |  | Separate uploaded, VEP-116 feature and minimized-edit geometry for one literal biallelic allele. |
-| [`duckvep_transcript_projection`](reference.md#duckvep_transcript_projection) | table_macro |  | Project independent literal alleles and existing DuckVEP annotations into typed, unshifted VEP-116 transcript display fields. |
-| [`duckvep_repeat_alleles`](reference.md#duckvep_repeat_alleles) | scalar_macro |  | Prepare bounded literal reference and alternate alleles from exact ordered repeat descriptions. |
-| [`duckvep_breakend_geometry`](reference.md#duckvep_breakend_geometry) | scalar |  | Parse one raw VCF 4.5 breakend ALT into mate coordinates, orientation and retained replacement sequence. |
-| [`duckvep_haplotypes`](reference.md#duckvep_haplotypes) | table | `rduckhts_haplotypes` | Replay literal phased CDS/protein paths with carriers, source contributors, coding blocks, aligned differences and optional protein HGVS. |
-| [`duckvep_phase_call`](reference.md#duckvep_phase_call) | scalar |  | Assign decoded GT/PS allele slots to haplotype lanes under strict or pinned VEP-116 phase policy. |
-| [`duckvep_annotate`](reference.md#duckvep_annotate) | table |  | Annotate independent literal alleles, exact typed structural events and paired breakends against a resident VEP-116-compatible model. |
-| [`duckvep_so_terms`](reference.md#duckvep_so_terms) | table |  | Return VEP-116 Sequence Ontology terms, consequence-mask bits, impact, severity rank and evaluator tier. |
-
 ### Readers
 
 | Function | Kind | R helper | Description |
 | --- | --- | --- | --- |
-| [`read_bcf`](reference.md#read_bcf) | table | `rduckhts_bcf` | Read VCF/BCF with header-typed INFO/FORMAT, typed CSQ/ANN/BCSQ annotations, sample selection and optional tidy sample rows. |
+| [`read_bcf`](reference.md#read_bcf) | table | `rduckhts_bcf` | Read VCF/BCF with header-typed INFO/FORMAT, typed CSQ/ANN/BCSQ annotations, sample selection, optional tidy sample rows and optional record file positions. |
 | [`read_geno`](reference.md#read_geno) | table | `rduckhts_geno` | Read one row per VCF/BCF record with typed arbitrary-ploidy GT/PS calls, selected FORMAT fields and optional original VCF genotype text. |
 | [`read_bcf_samples`](reference.md#read_bcf_samples) | table | `rduckhts_bcf_samples` | Read the typed VCF/BCF sample catalog as sample_index UINTEGER and sample_name VARCHAR without reading records. Indices are zero-based positions in the original header, remain stable under selection and join read_geno calls from the same unchanged file. NULL or '-' selects all; an empty string selects none; comma-separated names include samples; '^' excludes them. Names are validated by HTSlib, selected rows retain header order, and unknown names error. |
 | [`read_bam`](reference.md#read_bam) | table | `rduckhts_bam` | Read SAM/BAM/CRAM alignments with optional typed SAM tags, auxiliary maps and packed sequence, quality or CIGAR output. |
 | [`read_fasta`](reference.md#read_fasta) | table | `rduckhts_fasta` | Read full FASTA records or indexed regions with text or packed sequence output. |
-| [`read_bed`](reference.md#read_bed) | table | `rduckhts_bed` | Read BED3-BED12 interval files with canonical typed columns and optional tabix-backed region filtering. scan_mode := 'sequential' forces full-file streaming/counting instead of index-backed count paths and is incompatible with region. |
+| [`read_bed`](reference.md#read_bed) | table | `rduckhts_bed` | Read BED3-BED12 interval files with canonical typed columns and optional tabix-backed region filtering. |
 | [`fasta_nuc`](reference.md#fasta_nuc) | table | `rduckhts_fasta_nuc` | Compute bedtools nuc-style nucleotide composition for supplied BED intervals or generated fixed-width bins over a FASTA reference. A failed reference fetch fails the query with the file and zero-based half-open interval; requested intervals are not silently omitted. For bgzipped FASTA, gzi_path may point to an explicit .gzi sidecar when it is not colocated with the FASTA. |
 | [`read_fastq`](reference.md#read_fastq) | table | `rduckhts_fastq` | Read single-end, paired-end, or interleaved FASTQ files with optional legacy quality decoding. By default, FASTQ qualities are interpreted as modern Phred+33 input. Use sequence_encoding := 'nt16' to return SEQUENCE as UTINYINT[] and quality_representation := 'phred' to return QUALITY as UTINYINT[] instead of VARCHAR. input_quality_encoding accepts 'phred33', 'auto', 'phred64', or 'solexa64'. scan_mode := 'sequential' forces raw streaming/counting instead of index-backed count paths. |
 | [`read_bigwig`](reference.md#read_bigwig) | table | `rduckhts_bigwig` | Read stored BigWig signal intervals as CHROM, START0, END0 and VALUE. |
-| [`read_gff`](reference.md#read_gff) | table | `rduckhts_gff` | Read GFF annotations with optional raw scalar and parsed list/pair attributes, strict GFF3 validation and indexed region selection. |
-| [`read_gtf`](reference.md#read_gtf) | table | `rduckhts_gtf` | Read GTF annotations with optional raw scalar and parsed list/pair attributes and indexed region selection. |
+| [`read_gff`](reference.md#read_gff) | table | `rduckhts_gff` | Read GFF annotations with optional parsed attributes, strict GFF3 validation and indexed region selection. |
+| [`read_gtf`](reference.md#read_gtf) | table | `rduckhts_gtf` | Read GTF annotations with optional parsed attributes and indexed region selection. |
+| [`read_genbank`](reference.md#read_genbank) | table | `rduckhts_genbank` | Read GenBank flat-file features in read_gff's column shape, with optional parsed qualifier MAP. |
 | [`read_tabix`](reference.md#read_tabix) | table | `rduckhts_tabix` | Read tabix-indexed text with optional header handling, inferred types and region selection. |
 | [`fasta_index`](reference.md#fasta_index) | table | `rduckhts_fasta_index` | Build a FASTA index (.fai) and return a single row with columns success (BOOLEAN) and index_path (VARCHAR). |
 | [`hts_union_query`](reference.md#hts_union_query) | scalar_macro | `rduckhts_bam_multi, rduckhts_bcf_multi, rduckhts_fastq_multi, rduckhts_fasta_multi, rduckhts_bed_multi, rduckhts_tabix_multi, rduckhts_gff_multi, rduckhts_gtf_multi` | Generate a UNION ALL BY NAME query string that reads every file matching a glob pattern through the named reader function. The result includes a 'filename' column identifying the source file for each row. Assign to a variable with SET VARIABLE and execute via query(getvariable(...)). Optional params string is appended to each reader call. In R, use the typed rduckhts_*_multi() helpers instead, which accept file vectors with optional per-file parameters and create DuckDB tables directly. |
@@ -68,13 +56,26 @@ This section is generated from `functions.yaml`.
 | [`duckhts_bam_convert_parquet_sql`](reference.md#duckhts_bam_convert_parquet_sql) | scalar_macro | `rduckhts_bam_convert_parquet` | Build COPY SQL for read_bam() output with Parquet metadata, SAM header text and selected columns, filters or partitions. |
 | [`duckhts_gff_convert_parquet_sql`](reference.md#duckhts_gff_convert_parquet_sql) | scalar_macro | `rduckhts_gff_convert_parquet` | Build COPY SQL for read_gff() output with Parquet metadata, GFF/tabix header text and selected columns, filters or partitions. |
 | [`duckhts_tabix_convert_parquet_sql`](reference.md#duckhts_tabix_convert_parquet_sql) | scalar_macro | `rduckhts_tabix_convert_parquet` | Build COPY SQL for read_tabix() output with Parquet metadata, header text and selected columns, filters or partitions. |
+| [`genbank_to_fasta`](reference.md#genbank_to_fasta) | table | `rduckhts_genbank_to_fasta` | Write the ORIGIN sequence of each GenBank record as FASTA and return success, output_path and records_written. |
 
 ### Coverage
 
 | Function | Kind | R helper | Description |
 | --- | --- | --- | --- |
 | [`read_pileup`](reference.md#read_pileup) | table | `rduckhts_pileup` | Construct a region-scoped BAM pileup with one row per covered position, emitting chrom, 1-based position, depth, observed bases, and Phred+33 qualities after SAM flag and MAPQ filtering. This is a compact htslib pileup view, not samtools mpileup text parity. |
+| [`duckhts_bam_insert_size_counts_sql`](reference.md#duckhts_bam_insert_size_counts_sql) | table_macro | `rduckhts_bam_insert_size_counts_sql` | Compose projected BAM/CRAM reads, flag predicates and packed-CIGAR lengths into riker 0.4.1 insert-size counts. |
+| [`duckhts_bam_insert_size_counts`](reference.md#duckhts_bam_insert_size_counts) | table | `rduckhts_bam_insert_size_counts` | Reduce BAM/CRAM records to sparse insert-size counts using a native riker 0.4.1 kernel. |
+| [`duckhts_insert_size_metrics`](reference.md#duckhts_insert_size_metrics) | table_macro |  | Compute riker 0.4.1 weighted insert-size metrics from a named sparse counts relation. |
 | [`bam_bin_counts`](reference.md#bam_bin_counts) | table | `rduckhts_bam_bin_counts` | Count BAM or CRAM read starts into fixed-width bins. Returns one row per bin across the selected contig span, including zero-count bins, with total, forward, and reverse counts; `rmdup := 'streaming'` applies the WisecondorX-style larp/larp2 consecutive-position deduplication, `rmdup := 'flag'` drops SAM duplicate-flagged reads, and `stats := 'gc'`, `'mq'`, or `'gc,mq'` adds per-bin pre/post-filter GC and MAPQ sufficient statistics, including reference GC when `reference` is provided. |
+| [`duckhts_depth_bins`](reference.md#duckhts_depth_bins) | table_macro | `rduckhts_depth_bins` | Correct read counts in fixed bins for GC content with a median read rate per GC stratum, giving each bin an expected count, a depth ratio and whether it is kept. |
+| [`duckhts_depth_region_fraction`](reference.md#duckhts_depth_region_fraction) | table_macro | `rduckhts_depth_region_fraction` | Estimate the share of cells with a one-copy gain or loss of each named region from corrected bin depth, with an interval from the bins or from a reference set. |
+| [`duckhts_depth_region_fraction_ref`](reference.md#duckhts_depth_region_fraction_ref) | table_macro | `rduckhts_depth_region_fraction` | Estimate regional depth shifts and reference-calibrated uncertainty. |
+| [`duckhts_depth_sex_fraction`](reference.md#duckhts_depth_sex_fraction) | table_macro | `rduckhts_depth_sex_fraction` | Estimate the share of a second genome of the other sex from the depth of X and Y relative to the autosomes. |
+| [`duckhts_depth_sex_fraction_ref`](reference.md#duckhts_depth_sex_fraction_ref) | table_macro | `rduckhts_depth_sex_fraction` | Estimate sex-copy mixture fractions using XX and XY reference bins. |
+| [`duckhts_depth_state_solutions`](reference.md#duckhts_depth_state_solutions) | table_macro | `rduckhts_depth_state_solutions` | Fit the ichorCNA copy-number state model to corrected bins: tumour fraction, ploidy and rank of every start. |
+| [`duckhts_depth_state_segments`](reference.md#duckhts_depth_state_segments) | table_macro | `rduckhts_depth_state_segments` | Viterbi copy-number segments of every solution of the ichorCNA state model over corrected bins. |
+| [`duckhts_bam_mismatch_counts`](reference.md#duckhts_bam_mismatch_counts) | table | `rduckhts_bam_mismatch_counts` | Count aligned read bases against the reference by mate, cycle, base quality and substitution, optionally leaving out masked positions such as known variants. |
+| [`duckhts_bam_mate_overlap_counts`](reference.md#duckhts_bam_mate_overlap_counts) | table | `rduckhts_bam_mate_overlap_counts` | Count where read 1 and read 2 of one fragment agree and disagree at the positions both align to, by base quality and base, as an estimate of sequencing error. |
 | [`duckhts_bam_bed_coverage`](reference.md#duckhts_bam_bed_coverage) | table | `rduckhts_bam_bed_coverage` | Compute samtools coverage-like regional summaries for BAM or CRAM input over a BED target set, returning one row per BED interval with DuckHTS-specific pre/post-filter read counts, covered bases, percentage covered, mean depth, mean baseQ, mean mapQ, and strand-specific post-filter summaries in read mode. Indexed BAM/CRAM input is required in the current implementation. decompression_threads controls htslib worker threads for BAM/CRAM decoding; use 0 to disable them. |
 | [`duckhts_mosdepth`](reference.md#duckhts_mosdepth) | table | `rduckhts_mosdepth` | Write mosdepth-compatible coverage files from indexed BAM/CRAM. |
 
@@ -86,13 +87,12 @@ This section is generated from `functions.yaml`.
 | [`duckhts_cgranges_add`](reference.md#duckhts_cgranges_add) | scalar |  | Append an interval to a session-scoped cgranges registry entry before finalization. Labels may be BIGINT-like, DOUBLE, VARCHAR, or BOOLEAN. |
 | [`duckhts_cgranges_index`](reference.md#duckhts_cgranges_index) | scalar |  | Finalize a populated cgranges registry entry and build its immutable overlap index for subsequent queries. |
 | [`duckhts_cgranges_destroy`](reference.md#duckhts_cgranges_destroy) | scalar |  | Destroy a session-scoped cgranges registry entry and release its indexed interval storage when it is not in active use. |
-| [`duckhts_cgranges_from_query`](reference.md#duckhts_cgranges_from_query) | scalar |  | Execute a SQL query on an extension-owned DuckDB connection, append its interval rows into a session-scoped cgranges registry entry, and leave the populated index ready for explicit finalization with duckhts_cgranges_index(...). |
-| [`duckhts_cgranges_from_table`](reference.md#duckhts_cgranges_from_table) | scalar |  | Reserved convenience constructor for bulk cgranges population from a table name. The current implementation is intentionally deferred and directs callers to duckhts_cgranges_from_query(...). |
+| [`duckhts_cgranges_from_table`](reference.md#duckhts_cgranges_from_table) | table_macro |  | Create, populate and finalize a session-scoped cgranges registry entry from the rows of a table or view, on the caller's connection. |
+| [`duckhts_cgranges_from_table_labelled`](reference.md#duckhts_cgranges_from_table_labelled) | table_macro |  | Build and index a labelled interval index from a table or view. |
 | [`duckhts_cgranges_has_overlap`](reference.md#duckhts_cgranges_has_overlap) | scalar |  | Vectorized scalar predicate for streaming provider rows through a finalized session-scoped cgranges index. Returns TRUE when the query interval overlaps at least one indexed interval, or when mode = 'contain' and it fully contains at least one indexed interval; NULL inputs return NULL. |
 | [`duckhts_cgranges_count_overlaps`](reference.md#duckhts_cgranges_count_overlaps) | scalar |  | Vectorized scalar overlap counter for streaming provider rows through a finalized session-scoped cgranges index. Returns the number of indexed intervals that overlap the query interval, or with mode = 'contain' the number fully contained by it; NULL inputs return NULL. |
 | [`duckhts_cgranges_overlaps_list`](reference.md#duckhts_cgranges_overlaps_list) | scalar |  | Vectorized scalar overlap expander for streaming provider rows through a finalized session-scoped cgranges index. Returns a LIST of hit STRUCTs that can be expanded with UNNEST, preserving provider columns while emitting one row per matching indexed interval. Because scalar return types are fixed, labels are returned as text with label_type describing the original cgranges label kind; NULL inputs return NULL. |
 | [`duckhts_cgranges_overlaps`](reference.md#duckhts_cgranges_overlaps) | table |  | Query a finalized session-scoped cgranges registry entry and return one row per overlapping or containing indexed interval, preserving the original label type and interval coordinates. |
-| [`duckhts_cgranges_overlaps_bulk`](reference.md#duckhts_cgranges_overlaps_bulk) | table |  | Run a SQL query that yields overlap probes, stream those rows through a finalized session-scoped cgranges registry entry, and return one row per matching indexed interval. The probe query runs on the extension-owned helper connection, so it must reference regular tables/views rather than connection-local temp tables. When query_row_id_col is omitted, query_row_id defaults to the 1-based probe row ordinal. |
 | [`regionkey`](reference.md#regionkey) | scalar |  | Encode a genomic interval as an official RegionKey-compatible 64-bit unsigned integer. Start and end use 0-based half-open interval semantics, matching BED-style coordinates; strand accepts -1, 0, or 1. |
 | [`regionkey_hex`](reference.md#regionkey_hex) | scalar |  | Render a RegionKey as its lowercase 16-character hexadecimal string representation. |
 | [`parse_regionkey_hex`](reference.md#parse_regionkey_hex) | scalar |  | Parse a 16-character hexadecimal RegionKey string back into its UBIGINT code. Invalid or non-hex strings return NULL. |
@@ -118,18 +118,61 @@ This section is generated from `functions.yaml`.
 
 | Function | Kind | R helper | Description |
 | --- | --- | --- | --- |
-| [`duckhts_somalier_import_sites`](reference.md#duckhts_somalier_import_sites) | table_macro | `rduckhts_somalier_import_sites` | Import an already selected Somalier sites VCF/BCF as one canonical panel and population-frequency relation. |
+| [`duckhts_somalier_spacing`](reference.md#duckhts_somalier_spacing) | scalar | `rduckhts_somalier_find_sites` | Greedily select ranked Somalier candidate positions at a minimum genomic distance. |
+| [`duckhts_somalier_import_sites`](reference.md#duckhts_somalier_import_sites) | table_macro | `rduckhts_somalier_import_sites` | Import an already selected Somalier sites VCF/BCF as one canonical panel and population-frequency relation, autosomal and X/Y sites together. |
 | [`duckhts_somalier_vcf_counts`](reference.md#duckhts_somalier_vcf_counts) | table_macro | `rduckhts_somalier_vcf_counts` | Extract a complete panel-aligned A/B/other count relation from VCF/BCF FORMAT/AD. |
 | [`duckhts_somalier_bam_counts`](reference.md#duckhts_somalier_bam_counts) | table | `rduckhts_somalier_bam_counts` | Extract complete panel-aligned A/B/other base counts from one indexed BAM or CRAM source. |
+| [`duckhts_ancestry_proportions`](reference.md#duckhts_ancestry_proportions) | scalar | `rduckhts_ancestry_proportions` | Solve a nearest-positive-definite constrained ancestry projection from aggregated PC products. |
 | [`duckhts_somalier_panel_sha256`](reference.md#duckhts_somalier_panel_sha256) | scalar_macro |  | Derive a stable SHA-256 identity for an ordered biallelic sample-fingerprinting panel. |
 | [`duckhts_somalier_frequency_sha256`](reference.md#duckhts_somalier_frequency_sha256) | scalar_macro |  | Derive a stable identity for panel-aligned population-B allele frequencies. |
 | [`duckhts_somalier_classify`](reference.md#duckhts_somalier_classify) | scalar |  | Classify one measured A/B/other count tuple for Somalier-derived autosomal relatedness. |
 | [`duckhts_somalier_prepare_sketches`](reference.md#duckhts_somalier_prepare_sketches) | table_macro | `rduckhts_somalier_sketches` | Build one panel-verified packed relatedness sketch per sample from typed count evidence. |
 | [`duckhts_somalier_verify_sketches`](reference.md#duckhts_somalier_verify_sketches) | scalar_macro |  | Verify persisted relatedness sketches against their retained raw count evidence. |
 | [`duckhts_somalier_relatedness`](reference.md#duckhts_somalier_relatedness) | scalar | `rduckhts_somalier_relatedness` | Compute fused Somalier-derived relatedness and concordance statistics for two prepared sketches. |
+| [`duckhts_somalier_relatedness_all_pairs`](reference.md#duckhts_somalier_relatedness_all_pairs) | table_macro | `rduckhts_somalier_relatedness` | Compute Somalier-derived relatedness and concordance statistics for every unordered sample pair of one sketch relation. |
 | [`duckhts_somalier_verify_relatedness`](reference.md#duckhts_somalier_verify_relatedness) | scalar |  | Verify a typed relatedness result against its two sealed sketches. |
 | [`duckhts_somalier_charr`](reference.md#duckhts_somalier_charr) | table_macro | `rduckhts_somalier_charr` | Estimate per-sample contamination with a bounded Somalier-derived CHARR reduction. |
 | [`duckhts_somalier_matched_contamination`](reference.md#duckhts_somalier_matched_contamination) | table_macro | `rduckhts_somalier_matched_contamination` | Estimate directional contamination for explicitly selected receiver/anchor sample pairs. |
+| [`duckhts_somalier_sex`](reference.md#duckhts_somalier_sex) | table_macro | `rduckhts_somalier_sex` | Report X/Y dosage evidence and a review-only XX, XY or ambiguous call per sample from panel counts. |
+
+### Variants
+
+| Function | Kind | R helper | Description |
+| --- | --- | --- | --- |
+| [`duckhts_roh_segments`](reference.md#duckhts_roh_segments) | scalar |  | Decode runs of homozygosity from one sample's sorted per-chromosome site lists, reproducing bcftools roh. |
+| [`duckhts_roh`](reference.md#duckhts_roh) | table_macro | `rduckhts_roh` | Find runs of homozygosity in a VCF/BCF with the bcftools roh model, using allele frequencies from an INFO tag. |
+| [`duckhts_roh_map`](reference.md#duckhts_roh_map) | table_macro | `rduckhts_roh` | Find runs of homozygosity using an INFO allele frequency tag and a genetic map. |
+| [`duckhts_roh_af_table`](reference.md#duckhts_roh_af_table) | table_macro | `rduckhts_roh` | Find runs of homozygosity in a VCF/BCF with the bcftools roh model, using allele frequencies from a caller relation. |
+| [`duckhts_roh_af_table_map`](reference.md#duckhts_roh_af_table_map) | table_macro | `rduckhts_roh` | Find runs of homozygosity using matching allele frequencies and a genetic map. |
+| [`duckhts_roh_af_table_bcftools`](reference.md#duckhts_roh_af_table_bcftools) | table_macro | `rduckhts_roh` | Find runs of homozygosity like duckhts_roh_af_table, choosing the record of a repeated listed position as bcftools roh --AF-file does. |
+| [`duckhts_roh_af_table_bcftools_map`](reference.md#duckhts_roh_af_table_bcftools_map) | table_macro | `rduckhts_roh` | Find runs of homozygosity using bcftools AF-file site selection and a genetic map. |
+| [`duckhts_roh_ancestry`](reference.md#duckhts_roh_ancestry) | table_macro | `rduckhts_roh` | Find runs of homozygosity using each sample's ancestry-weighted allele frequencies. |
+| [`duckhts_roh_ancestry_map`](reference.md#duckhts_roh_ancestry_map) | table_macro | `rduckhts_roh` | Find runs of homozygosity using ancestry-weighted frequencies and a genetic map. |
+| [`duckhts_roh_counts`](reference.md#duckhts_roh_counts) | table_macro | `rduckhts_roh_counts` | Find runs of homozygosity from allele read counts, with sequencing error, optional contamination, allele balance and a site artefact term. |
+| [`duckhts_roh_counts_map`](reference.md#duckhts_roh_counts_map) | table_macro | `rduckhts_roh_counts` | Find runs of homozygosity from read counts using a genetic map. |
+| [`duckhts_roh_counts_fitted`](reference.md#duckhts_roh_counts_fitted) | table_macro | `rduckhts_roh_counts` | Find runs of homozygosity from allele read counts using per-sample fitted error, contamination, allele balance and artefact weight, with the share of each run that the artefact weight's interval does not move and the bases a higher weight would add next to it. |
+| [`duckhts_roh_counts_fitted_map`](reference.md#duckhts_roh_counts_fitted_map) | table_macro | `rduckhts_roh_counts` | Decode read-count ROH with per-sample fitted parameters and a genetic map. |
+| [`duckhts_count_error_fit`](reference.md#duckhts_count_error_fit) | table_macro | `rduckhts_count_error_fit` | Fit read error, contamination and allele balance of each sample by maximum likelihood from allele read counts at sites of known population frequency. |
+| [`duckhts_count_mixture_lowpass`](reference.md#duckhts_count_mixture_lowpass) | table_macro | `rduckhts_count_mixture_lowpass` | Estimate a conditional second-genome share from calibrated low-pass read and discordant-pair moments. |
+| [`variantkey`](reference.md#variantkey) | scalar |  | Encode a normalized biallelic variant as an official VariantKey-compatible 64-bit unsigned integer. This DuckHTS wrapper accepts 1-based VCF/DuckHTS POS to match bcftools `%VKX` / `+add-variantkey`, internally converts to the upstream 0-based field, and preserves the official hashed nonreversible mode for large, ambiguous, and symbolic REF/ALT strings. Only CHROM, POS, REF, and ALT are encoded; END, SVLEN, mate breakend coordinates, and other SV metadata are not. |
+| [`variantkey_hex`](reference.md#variantkey_hex) | scalar |  | Render a VariantKey as its lowercase 16-character hexadecimal string representation. |
+| [`parse_variantkey_hex`](reference.md#parse_variantkey_hex) | scalar |  | Parse a 16-character hexadecimal VariantKey string back into its UBIGINT code. Invalid or non-hex strings return NULL. |
+| [`encode_variantkey`](reference.md#encode_variantkey) | scalar |  | Encode the raw upstream VariantKey fields directly: chromosome code, 0-based position, and 31-bit REF+ALT code. |
+| [`extract_variantkey_chrom`](reference.md#extract_variantkey_chrom) | scalar |  | Extract the raw upstream VariantKey chromosome code. |
+| [`extract_variantkey_pos`](reference.md#extract_variantkey_pos) | scalar |  | Extract the raw upstream VariantKey 0-based position field. |
+| [`extract_variantkey_refalt`](reference.md#extract_variantkey_refalt) | scalar |  | Extract the raw upstream 31-bit VariantKey REF+ALT code. |
+| [`decode_variantkey`](reference.md#decode_variantkey) | scalar |  | Decode a VariantKey into its raw upstream numeric fields: chrom_code, pos0, and refalt_code. |
+| [`reverse_variantkey`](reference.md#reverse_variantkey) | scalar |  | Decode a VariantKey into a STRUCT with chrom, chrom_code, 1-based pos, upstream 0-based pos0, ref, alt, refalt_code, and reversible. For hashed nonreversible keys, reversible is FALSE and ref/alt are returned as NULL because DuckHTS v1 does not ship the optional NRVK lookup sidecar. |
+| [`variantkey_range`](reference.md#variantkey_range) | scalar |  | Return the inclusive minimum and maximum VariantKey bounds for a chromosome plus 1-based VCF position range, suitable for numeric range filtering on precomputed VariantKeys. |
+| [`duckhts_contig_key`](reference.md#duckhts_contig_key) | scalar |  | Return a conservative contig join key by removing one non-empty leading chr prefix case-insensitively and normalizing M/MT to MT. X and Y are uppercased; all other suffixes are preserved. This does not map numeric sex chromosomes, accessions, patches, or alternate loci. |
+| [`bcftools_liftover`](reference.md#bcftools_liftover) | scalar | `rduckhts_liftover` | Row-oriented liftover kernel intended to mirror bcftools +liftover semantics as closely as possible while returning one STRUCT per input row with fields: src_chrom, src_pos, src_ref, src_alt, dest_chrom, dest_pos, dest_end, dest_ref, dest_alt, mapped, reverse_complemented, swap, reject_reason, and note. Set no_left_align := true to skip post-liftover left-alignment of lifted indels (mirrors --no-left-align in bcftools +liftover). |
+| [`duckhts_liftover`](reference.md#duckhts_liftover) | table_macro | `rduckhts_liftover` | Lift variants from a table or derived-table expression with bcftools_liftover. |
+| [`bcftools_norm_row`](reference.md#bcftools_norm_row) | scalar |  | Normalize one variant against FASTA with bcftools/vt-style left alignment. |
+| [`duckhts_bcftools_norm`](reference.md#duckhts_bcftools_norm) | table_macro | `rduckhts_bcftools_norm` | Normalize variants from a table or derived-table expression while preserving input columns. |
+| [`bcftools_score`](reference.md#bcftools_score) | table | `rduckhts_score` | Compute polygenic scores from genotype VCF/BCF and summary statistics using bcftools +score dosage semantics. |
+| [`bcftools_munge_row`](reference.md#bcftools_munge_row) | scalar |  | Normalize one summary-statistics row into GWAS-VCF-style fields (chrom/pos/ref/alt/effect metrics), resolving REF/ALT orientation against a FASTA reference and applying swap-aware sign/frequency/count transforms. The output flag `alleles_swapped` means REF/ALT orientation was swapped to match the FASTA reference. |
+| [`duckhts_munge`](reference.md#duckhts_munge) | table_macro | `rduckhts_munge` | Map source columns and normalize summary statistics with bcftools_munge_row. |
+| [`duckhts_munge_metal`](reference.md#duckhts_munge_metal) | table_macro | `rduckhts_munge` | Normalize summary statistics with additional METAL meta-analysis output columns. |
 
 ### Metadata
 
@@ -156,30 +199,6 @@ This section is generated from `functions.yaml`.
 | [`bam_index`](reference.md#bam_index) | table | `rduckhts_bam_index` | Build a BAM or CRAM index and report the written index path and format. |
 | [`bcf_index`](reference.md#bcf_index) | table | `rduckhts_bcf_index` | Build a TBI or CSI index for a VCF or BCF file and report the written index path and format. |
 | [`tabix_index`](reference.md#tabix_index) | table | `rduckhts_tabix_index` | Build a tabix index for a BGZF-compressed text file using a preset or explicit coordinate columns. |
-
-### Variants
-
-| Function | Kind | R helper | Description |
-| --- | --- | --- | --- |
-| [`variantkey`](reference.md#variantkey) | scalar |  | Encode a normalized biallelic variant as an official VariantKey-compatible 64-bit unsigned integer. This DuckHTS wrapper accepts 1-based VCF/DuckHTS POS to match bcftools `%VKX` / `+add-variantkey`, internally converts to the upstream 0-based field, and preserves the official hashed nonreversible mode for large, ambiguous, and symbolic REF/ALT strings. Only CHROM, POS, REF, and ALT are encoded; END, SVLEN, mate breakend coordinates, and other SV metadata are not. |
-| [`variantkey_hex`](reference.md#variantkey_hex) | scalar |  | Render a VariantKey as its lowercase 16-character hexadecimal string representation. |
-| [`parse_variantkey_hex`](reference.md#parse_variantkey_hex) | scalar |  | Parse a 16-character hexadecimal VariantKey string back into its UBIGINT code. Invalid or non-hex strings return NULL. |
-| [`encode_variantkey`](reference.md#encode_variantkey) | scalar |  | Encode the raw upstream VariantKey fields directly: chromosome code, 0-based position, and 31-bit REF+ALT code. |
-| [`extract_variantkey_chrom`](reference.md#extract_variantkey_chrom) | scalar |  | Extract the raw upstream VariantKey chromosome code. |
-| [`extract_variantkey_pos`](reference.md#extract_variantkey_pos) | scalar |  | Extract the raw upstream VariantKey 0-based position field. |
-| [`extract_variantkey_refalt`](reference.md#extract_variantkey_refalt) | scalar |  | Extract the raw upstream 31-bit VariantKey REF+ALT code. |
-| [`decode_variantkey`](reference.md#decode_variantkey) | scalar |  | Decode a VariantKey into its raw upstream numeric fields: chrom_code, pos0, and refalt_code. |
-| [`reverse_variantkey`](reference.md#reverse_variantkey) | scalar |  | Decode a VariantKey into a STRUCT with chrom, chrom_code, 1-based pos, upstream 0-based pos0, ref, alt, refalt_code, and reversible. For hashed nonreversible keys, reversible is FALSE and ref/alt are returned as NULL because DuckHTS v1 does not ship the optional NRVK lookup sidecar. |
-| [`variantkey_range`](reference.md#variantkey_range) | scalar |  | Return the inclusive minimum and maximum VariantKey bounds for a chromosome plus 1-based VCF position range, suitable for numeric range filtering on precomputed VariantKeys. |
-| [`duckhts_contig_key`](reference.md#duckhts_contig_key) | scalar |  | Return a conservative contig join key by removing one non-empty leading chr prefix case-insensitively and normalizing M/MT to MT. X and Y are uppercased; all other suffixes are preserved. This does not map numeric sex chromosomes, accessions, patches, or alternate loci. |
-| [`bcftools_liftover`](reference.md#bcftools_liftover) | scalar | `rduckhts_liftover` | Row-oriented liftover kernel intended to mirror bcftools +liftover semantics as closely as possible while returning one STRUCT per input row with fields: src_chrom, src_pos, src_ref, src_alt, dest_chrom, dest_pos, dest_end, dest_ref, dest_alt, mapped, reverse_complemented, swap, reject_reason, and note. Set no_left_align := true to skip post-liftover left-alignment of lifted indels (mirrors --no-left-align in bcftools +liftover). |
-| [`duckdb_liftover`](reference.md#duckdb_liftover) | table_macro | `rduckhts_liftover` | DuckDB-specific wrapper over bcftools_liftover that takes either a table name or a derived-table expression plus column-name strings for chrom/pos/ref/alt and returns the lifted table. The no_left_align parameter mirrors --no-left-align in bcftools +liftover. |
-| [`bcftools_norm_row`](reference.md#bcftools_norm_row) | scalar |  | Normalize one variant against FASTA with bcftools/vt-style left alignment. |
-| [`duckhts_bcftools_norm`](reference.md#duckhts_bcftools_norm) | table_macro | `rduckhts_bcftools_norm` | Normalize variants from a table or derived-table expression while preserving input columns. |
-| [`bcftools_score`](reference.md#bcftools_score) | table | `rduckhts_score` | Compute polygenic scores from genotype VCF/BCF and summary statistics using bcftools +score dosage semantics. |
-| [`bcftools_munge_row`](reference.md#bcftools_munge_row) | scalar |  | Normalize one summary-statistics row into GWAS-VCF-style fields (chrom/pos/ref/alt/effect metrics), resolving REF/ALT orientation against a FASTA reference and applying swap-aware sign/frequency/count transforms. The output flag `alleles_swapped` means REF/ALT orientation was swapped to match the FASTA reference. |
-| [`duckdb_munge`](reference.md#duckdb_munge) | table_macro | `rduckhts_munge` | DuckDB macro wrapper over bcftools_munge_row that maps source columns (via preset or explicit map) and returns normalized GWAS-VCF-style rows with lean outputs and explicit `alleles_swapped` semantics. Output columns: chrom, pos, id, ref, alt, alleles_swapped, filter, ns, ez, nc, es, se, lp, af, ac, ne (16 columns). For METAL meta-analysis output with SI/I2/CQ/ED columns, use duckdb_munge_metal. |
-| [`duckdb_munge_metal`](reference.md#duckdb_munge_metal) | table_macro | `rduckhts_munge` | Extended munge macro with METAL meta-analysis output columns. Same as duckdb_munge but additionally emits: si (imputation info, from INFO input), i2 (Cochran's I² heterogeneity, from HET_I2), cq (Cochran's Q -log10 p, from HET_LP or -log10(HET_P)), and ed (effect direction string, from DIRE; +/- flipped on allele swap). The R wrapper rduckhts_munge() auto-dispatches to this macro when metal keys (INFO, HET_I2, HET_P, HET_LP, DIRE) are present in the resolved column map. |
 
 ### Sequence UDFs
 
@@ -225,4 +244,5 @@ This section is generated from `functions.yaml`.
 | [`cigar_aligned_query_length`](reference.md#cigar_aligned_query_length) | scalar |  | Return the aligned query length from a CIGAR string, counting `M`, `=`, and `X` but excluding clips and insertions. Overloaded to also accept a UINTEGER[] binary CIGAR (as produced by read_bam(cigar_representation := 'binary')); the binary overload is bit-identical to the text path. |
 | [`cigar_reference_length`](reference.md#cigar_reference_length) | scalar |  | Return the reference-consuming length from a CIGAR string, counting `M`, `D`, `N`, `=`, and `X`. Overloaded to also accept a UINTEGER[] binary CIGAR (as produced by read_bam(cigar_representation := 'binary')); the binary overload is bit-identical to the text path. |
 | [`cigar_has_op`](reference.md#cigar_has_op) | scalar |  | Test whether a CIGAR string contains at least one instance of the requested operator. Overloaded to also accept a UINTEGER[] binary CIGAR (as produced by read_bam(cigar_representation := 'binary')); the binary overload is bit-identical to the text path. |
+| [`cigar_aligned_blocks`](reference.md#cigar_aligned_blocks) | scalar |  | Return the aligned blocks of a CIGAR as a struct of three parallel BIGINT lists: ref_start, query_start and width, one entry per M, = or X op in CIGAR order. Overloaded to also accept a UINTEGER[] binary CIGAR (as produced by read_bam(cigar_representation := 'binary')); the binary overload is bit-identical to the text path. |
 

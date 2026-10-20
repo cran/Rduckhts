@@ -15,6 +15,8 @@ DUCKDB_EXTENSION_EXTERN
 #include "htslib/vcf.h"
 #include "htslib/faidx.h"
 
+#include "include/duckdb_map.h"
+
 // ===============================
 // Helpers
 // ===============================
@@ -713,29 +715,24 @@ static void read_hts_header_scan(duckdb_function_info info, duckdb_data_chunk ou
             }
 
             if (e->n_kv > 0) {
-                duckdb_list_entry entry;
-                entry.offset = duckdb_list_vector_get_size(vec_kv);
-                entry.length = e->n_kv;
-                duckdb_list_vector_reserve(vec_kv, entry.offset + entry.length);
-                duckdb_list_vector_set_size(vec_kv, entry.offset + entry.length);
-
-                duckdb_vector child = duckdb_list_vector_get_child(vec_kv);
-                duckdb_vector key_vec = duckdb_struct_vector_get_child(child, 0);
-                duckdb_vector val_vec = duckdb_struct_vector_get_child(child, 1);
-
-                for (int i = 0; i < e->n_kv; i++) {
-                    duckdb_vector_assign_string_element(key_vec, entry.offset + i, e->kv_keys[i]);
-                    duckdb_vector_assign_string_element(val_vec, entry.offset + i, e->kv_vals[i]);
+                duckhts_map_pairs kv;
+                if (!duckhts_map_pairs_begin(vec_kv, (idx_t)e->n_kv, &kv)) {
+                    duckdb_function_set_error(info, "read_hts_header: out of memory reserving key_values map");
+                    duckdb_data_chunk_set_size(output, 0);
+                    return;
                 }
-
-                duckdb_list_entry *list_data = (duckdb_list_entry *)duckdb_vector_get_data(vec_kv);
-                list_data[row_count] = entry;
+                for (int i = 0; i < e->n_kv; i++) {
+                    const char *key = e->kv_keys[i];
+                    const char *val = e->kv_vals[i];
+                    if (!duckhts_map_pairs_put(&kv, key, strlen(key), val, strlen(val))) {
+                        duckdb_function_set_error(info, "read_hts_header: key_values exceeds its reservation");
+                        duckdb_data_chunk_set_size(output, 0);
+                        return;
+                    }
+                }
+                duckhts_map_pairs_finish(&kv, row_count);
             } else {
-                duckdb_vector_ensure_validity_writable(vec_kv);
-                duckdb_validity_set_row_invalid(duckdb_vector_get_validity(vec_kv), row_count);
-                duckdb_list_entry entry = {duckdb_list_vector_get_size(vec_kv), 0};
-                duckdb_list_entry *list_data = (duckdb_list_entry *)duckdb_vector_get_data(vec_kv);
-                list_data[row_count] = entry;
+                duckhts_list_set_null(vec_kv, row_count);
             }
         }
 
@@ -850,6 +847,13 @@ static void add_index_entry(hts_index_bind_t *bind, const char *seqname, int64_t
     bind->n_entries = n;
 }
 
+/* sam_index_load3() returns a CRAM index behind the hts_idx_t pointer type. It
+ * is a smaller object with none of the BAI/CSI fields; only its format may be
+ * read, so every other accessor is reserved for an index that has bins. */
+static int index_has_bins(hts_idx_t *idx) {
+    return idx != NULL && hts_idx_fmt(idx) != HTS_FMT_CRAI;
+}
+
 static void capture_index_meta(hts_index_bind_t *bind, hts_idx_t *idx) {
     if (!bind || !idx) return;
     uint32_t meta_len = 0;
@@ -942,16 +946,20 @@ static void read_hts_index_bind(duckdb_bind_info info) {
             return;
         }
 
-        capture_index_meta(bind, idx);
-        int nseq = hts_idx_nseq(idx);
-        uint64_t n_no_coor = hts_idx_get_n_no_coor(idx);
-        for (int tid = 0; tid < nseq; tid++) {
-            const char *name = sam_hdr_tid2name(hdr, tid);
-            int64_t len = (int64_t)sam_hdr_tid2len(hdr, tid);
-            uint64_t mapped = 0, unmapped = 0;
-            int has_stat = (hts_idx_get_stat(idx, tid, &mapped, &unmapped) == 0);
-            add_index_entry(bind, name, tid, len, has_stat, mapped, unmapped, 1, n_no_coor,
-                            index_fmt_to_string(hts_idx_fmt(idx)), index_path);
+        /* A CRAM index has no bins, metadata or statistics to report: it
+         * yields no rows. */
+        if (index_has_bins(idx)) {
+            capture_index_meta(bind, idx);
+            int nseq = hts_idx_nseq(idx);
+            uint64_t n_no_coor = hts_idx_get_n_no_coor(idx);
+            for (int tid = 0; tid < nseq; tid++) {
+                const char *name = sam_hdr_tid2name(hdr, tid);
+                int64_t len = (int64_t)sam_hdr_tid2len(hdr, tid);
+                uint64_t mapped = 0, unmapped = 0;
+                int has_stat = (hts_idx_get_stat(idx, tid, &mapped, &unmapped) == 0);
+                add_index_entry(bind, name, tid, len, has_stat, mapped, unmapped, 1, n_no_coor,
+                                index_fmt_to_string(hts_idx_fmt(idx)), index_path);
+            }
         }
         hts_idx_destroy(idx);
         sam_hdr_destroy(hdr);
@@ -1455,19 +1463,22 @@ static void read_hts_index_spans_bind(duckdb_bind_info info) {
             return;
         }
 
-        capture_index_spans_meta(bind, idx);
-        duckhts_idx_view_t *idx_view = (duckhts_idx_view_t *)idx;
-        int nseq = hts_idx_nseq(idx);
-        uint64_t n_no_coor = hts_idx_get_n_no_coor(idx);
-        for (int tid = 0; tid < nseq; tid++) {
-            const char *name = sam_hdr_tid2name(hdr, tid);
-            int64_t len = (int64_t)sam_hdr_tid2len(hdr, tid);
-            uint64_t mapped = 0, unmapped = 0;
-            int has_stat = (hts_idx_get_stat(idx, tid, &mapped, &unmapped) == 0);
-            add_index_chunk_rows(bind, idx_view, name, tid, len,
-                                 has_stat, mapped, unmapped,
-                                 1, n_no_coor,
-                                 index_fmt_to_string(hts_idx_fmt(idx)), index_path);
+        /* A CRAM index has no bins or chunks to expand: it yields no rows. */
+        if (index_has_bins(idx)) {
+            capture_index_spans_meta(bind, idx);
+            duckhts_idx_view_t *idx_view = (duckhts_idx_view_t *)idx;
+            int nseq = hts_idx_nseq(idx);
+            uint64_t n_no_coor = hts_idx_get_n_no_coor(idx);
+            for (int tid = 0; tid < nseq; tid++) {
+                const char *name = sam_hdr_tid2name(hdr, tid);
+                int64_t len = (int64_t)sam_hdr_tid2len(hdr, tid);
+                uint64_t mapped = 0, unmapped = 0;
+                int has_stat = (hts_idx_get_stat(idx, tid, &mapped, &unmapped) == 0);
+                add_index_chunk_rows(bind, idx_view, name, tid, len,
+                                     has_stat, mapped, unmapped,
+                                     1, n_no_coor,
+                                     index_fmt_to_string(hts_idx_fmt(idx)), index_path);
+            }
         }
         hts_idx_destroy(idx);
         sam_hdr_destroy(hdr);
@@ -1787,6 +1798,7 @@ void register_read_hts_header_function(duckdb_connection connection) {
     duckdb_table_function_set_function(tf, read_hts_header_scan);
 
     duckdb_register_table_function(connection, tf);
+    duckdb_destroy_table_function(&tf);
     duckdb_destroy_logical_type(&varchar_type);
 }
 
@@ -1804,6 +1816,7 @@ void register_read_hts_index_function(duckdb_connection connection) {
     duckdb_table_function_set_function(tf, read_hts_index_scan);
 
     duckdb_register_table_function(connection, tf);
+    duckdb_destroy_table_function(&tf);
     duckdb_destroy_logical_type(&varchar_type);
 }
 
@@ -1821,5 +1834,6 @@ void register_read_hts_index_spans_function(duckdb_connection connection) {
     duckdb_table_function_set_function(tf, read_hts_index_spans_scan);
 
     duckdb_register_table_function(connection, tf);
+    duckdb_destroy_table_function(&tf);
     duckdb_destroy_logical_type(&varchar_type);
 }

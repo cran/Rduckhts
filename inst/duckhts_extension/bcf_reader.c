@@ -22,6 +22,7 @@ DUCKDB_EXTENSION_EXTERN
 // htslib headers
 #include <htslib/vcf.h>
 #include <htslib/hts.h>
+#include <htslib/bgzf.h>
 #include <htslib/hts_log.h>
 #include <htslib/tbx.h>
 #include <htslib/kstring.h>
@@ -30,6 +31,7 @@ DUCKDB_EXTENSION_EXTERN
 #include "include/duckdb_alloc.h"
 #include "include/duckdb_list.h"
 #include "include/region_list.h"
+#include "include/regions_bind.h"
 #include "include/bcf_scan.h"
 #include "include/bcf_field_vector.h"
 #include "include/bcf_filter_vector.h"
@@ -74,6 +76,7 @@ typedef enum {
     BCF_OUT_ALT,
     BCF_OUT_QUAL,
     BCF_OUT_FILTER,
+    BCF_OUT_FILE_OFFSET,
     BCF_OUT_VEP,
     BCF_OUT_INFO,
     BCF_OUT_SAMPLE_ID,
@@ -117,6 +120,9 @@ typedef struct {
     duckhts_bcf_decode_policy_t decode_error_policy; // null|warn|error for BCF decode mismatches
     char** regions;            // Parsed comma-separated regions
     unsigned int n_regions;
+    duckhts_interval_plan_t plan; // Immutable typed intervals when typed_regions
+    int typed_regions;
+    int has_selector;          // Region string or typed regions present, even if empty
     int n_samples;             // Number of samples
     char** sample_names;       // Borrowed from immutable selected_samples
     duckhts_bcf_samples_t selected_samples;
@@ -124,6 +130,8 @@ typedef struct {
     // Tidy format options
     int tidy_format;           // If true, emit one row per variant-sample with SAMPLE_ID column
     int sample_id_col_idx;     // Column index for SAMPLE_ID (when tidy_format=true)
+
+    int file_offset_col_idx;   // Column index for FILE_OFFSET (include_file_offset), else -1
 
     // Field metadata
     int n_info_fields;
@@ -185,6 +193,13 @@ typedef struct {
     int need_vep;
     int count_only;
     uint64_t count_remaining;
+
+    // FILE_OFFSET: the BGZF virtual position immediately after the current
+    // record, taken when the record is read, so that tidy rows of one record
+    // share it across output chunks. Only BGZF-compressed input has one.
+    int file_offset_projected;
+    int file_offset_bgzf;
+    uint64_t record_end_offset;
 
     // Parallel scan state
     int is_parallel;
@@ -249,6 +264,7 @@ static void destroy_bind_data(void* data) {
     if (bind->region) duckdb_free(bind->region);
     if (bind->additional_csq_column_types) duckdb_free(bind->additional_csq_column_types);
     free(bind->regions); /* one region-list allocation, including strings */
+    duckhts_interval_plan_destroy(&bind->plan);
 
     duckhts_bcf_samples_destroy(&bind->selected_samples);
 
@@ -529,6 +545,12 @@ static int bcf_projected_columns_init(bcf_init_data_t *local, const bcf_bind_dat
             default: break;
         }
         if (col->kind != BCF_OUT_INVALID) {
+            continue;
+        }
+
+        if (bind->file_offset_col_idx >= 0 && col_id == (idx_t)bind->file_offset_col_idx) {
+            col->kind = BCF_OUT_FILE_OFFSET;
+            local->file_offset_projected = 1;
             continue;
         }
 
@@ -852,6 +874,14 @@ static void bcf_read_bind(duckdb_bind_info info) {
     }
     if (tidy_val) duckdb_destroy_value(&tidy_val);
 
+    // Optional FILE_OFFSET column (default: false)
+    int include_file_offset = 0;
+    duckdb_value file_offset_val = duckdb_bind_get_named_parameter(info, "include_file_offset");
+    if (file_offset_val && !duckdb_is_null_value(file_offset_val)) {
+        include_file_offset = duckdb_get_bool(file_offset_val);
+    }
+    if (file_offset_val) duckdb_destroy_value(&file_offset_val);
+
     // Optional bcftools-style CSQ/ANN/BCSQ type overrides
     char* additional_csq_column_types = NULL;
     int decompression_threads = 0;
@@ -922,6 +952,28 @@ static void bcf_read_bind(duckdb_bind_info info) {
         duckdb_bind_set_error(info, region_error);
         goto bind_error;
     }
+    char regions_error[256];
+    if (!duckhts_regions_bind(info, &bind->plan, &bind->typed_regions,
+                              regions_error, sizeof(regions_error))) {
+        char detail[300];
+        snprintf(detail, sizeof(detail), "%s: %s", reader_name, regions_error);
+        duckdb_bind_set_error(info, detail);
+        goto bind_error;
+    }
+    if (bind->typed_regions && region) {
+        char detail[128];
+        snprintf(detail, sizeof(detail), "%s: region and regions are mutually exclusive", reader_name);
+        duckdb_bind_set_error(info, detail);
+        goto bind_error;
+    }
+    bind->has_selector = bind->n_regions > 0 || bind->typed_regions;
+    if (bind->typed_regions && bind->scan_sequential) {
+        char detail[160];
+        snprintf(detail, sizeof(detail),
+                 "%s: scan_mode := 'sequential' is incompatible with regions queries", reader_name);
+        duckdb_bind_set_error(info, detail);
+        goto bind_error;
+    }
     duckdb_value samples_val = duckdb_bind_get_named_parameter(info, "samples");
     char *sample_selector = NULL;
     if (samples_val && !duckdb_is_null_value(samples_val)) {
@@ -944,6 +996,7 @@ static void bcf_read_bind(duckdb_bind_info info) {
     bind->sample_names = bind->selected_samples.names;
     bind->tidy_format = tidy_format;
     bind->sample_id_col_idx = -1;  // Will be set if tidy_format=true
+    bind->file_offset_col_idx = -1;  // Will be set if include_file_offset=true
     bind->n_vep_fields = 0;
     bind->vep_col_start = COL_CORE_COUNT;
     bind->info_col_start = COL_CORE_COUNT;
@@ -991,6 +1044,15 @@ static void bcf_read_bind(duckdb_bind_info info) {
     // FILTER - LIST(VARCHAR) - list of filter names
     duckdb_bind_add_result_column(info, "FILTER", varchar_list_type);
     col_idx++;
+
+    // FILE_OFFSET - UBIGINT, only when requested
+    if (include_file_offset) {
+        duckdb_logical_type ubigint_type = duckdb_create_logical_type(DUCKDB_TYPE_UBIGINT);
+        duckdb_bind_add_result_column(info, "FILE_OFFSET", ubigint_type);
+        duckdb_destroy_logical_type(&ubigint_type);
+        bind->file_offset_col_idx = col_idx;
+        col_idx++;
+    }
 
     // -------------------------------------------------------------------------
     // VEP/CSQ/BCSQ/ANN fields (auto-detected)
@@ -1200,21 +1262,32 @@ static void bcf_read_bind(duckdb_bind_info info) {
 
         int loaded = duckhts_bcf_index_load(&bind->index, fmt, file_path, index_path, flags);
         if (loaded < 0) goto bind_oom;
-        if (!loaded && bind->n_regions > 0) {
+        if (!loaded && bind->has_selector) {
             char err[512];
-            snprintf(err, sizeof(err),
-                     "%s: region query requires an index file (.tbi or .csi). Region: %s",
-                     reader_name, bind->region);
+            if (bind->typed_regions) {
+                snprintf(err, sizeof(err),
+                         "%s: regions query requires an index file (.tbi or .csi)", reader_name);
+            } else {
+                snprintf(err, sizeof(err),
+                         "%s: region query requires an index file (.tbi or .csi). Region: %s",
+                         reader_name, bind->region);
+            }
             duckdb_bind_set_error(info, err);
             goto bind_error;
         }
-        if (loaded && bind->n_regions == 0) {
+        if (loaded && !bind->has_selector) {
             const hts_idx_t *idx = bind->index.bcf ? bind->index.bcf : bind->index.tabix->idx;
             int tidy_rows = bind->tidy_format && bind->n_samples > 0;
             uint64_t row_multiplier = tidy_rows ? (uint64_t)bind->n_samples : 1;
             bind->index_row_count_valid = bcf_try_get_index_row_count(idx,
                                                                       row_multiplier,
                                                                       &bind->index_row_count);
+            /* Without an estimate the planner takes this scan for a small one
+             * and may build a hash join on its rows (samples times records in
+             * tidy format) instead of on the relation it is joined to. */
+            if (bind->index_row_count_valid) {
+                duckdb_bind_set_cardinality(info, (idx_t)bind->index_row_count, false);
+            }
             if (!bcf_bind_contig_names(bind, hdr, bind->index.tabix)) goto bind_oom;
         }
     }
@@ -1262,7 +1335,7 @@ static void bcf_read_global_init(duckdb_init_info info) {
     }
 
     global->current_contig = 0;
-    global->has_region = (bind->n_regions > 0);
+    global->has_region = bind->has_selector;
 
     // Enable parallel scan if:
     // 1. Index exists
@@ -1325,7 +1398,7 @@ static void bcf_read_local_init(duckdb_init_info info) {
         }
     }
 
-    if (local->column_count == 0 && !bind->scan_sequential && bind->n_regions == 0 && bind->index_row_count_valid) {
+    if (local->column_count == 0 && !bind->scan_sequential && !bind->has_selector && bind->index_row_count_valid) {
         local->count_only = 1;
         local->count_remaining = bind->index_row_count;
         local->done = (local->count_remaining == 0);
@@ -1342,7 +1415,7 @@ static void bcf_read_local_init(duckdb_init_info info) {
     }
 
     // Check if we're in parallel mode based on bind data
-    int is_parallel = (!bind->scan_sequential && bind->n_contigs > 1 && bind->n_regions == 0);
+    int is_parallel = (!bind->scan_sequential && bind->n_contigs > 1 && !bind->has_selector);
 
     // Initialize parallel scan state
     local->is_parallel = is_parallel;
@@ -1351,7 +1424,7 @@ static void bcf_read_local_init(duckdb_init_info info) {
     char open_error[512];
     if (!duckhts_bcf_scan_open(&local->scan, bind->file_path, &bind->index,
                                bind->decompression_threads,
-                               is_parallel || bind->n_regions > 0
+                               is_parallel || bind->has_selector
                                    ? DUCKHTS_HTS_IO_PROFILE_INDEXED_REGION
                                    : DUCKHTS_HTS_IO_PROFILE_STREAMING,
                                reader_name, open_error, sizeof(open_error))) {
@@ -1367,6 +1440,13 @@ static void bcf_read_local_init(duckdb_init_info info) {
         return;
     }
 
+    /* Only BGZF compression gives virtual positions that every scan path of
+     * one file shares. is_bgzf selects the fp union member; a BCF stream
+     * without BGZF blocks and a plain gzip VCF also use it, so the compression
+     * is checked too. */
+    local->file_offset_bgzf = local->scan.fp->is_bgzf &&
+                              hts_get_format(local->scan.fp)->compression == bgzf;
+
     // Allocate record
     local->rec = bcf_init();
     if (!local->rec) {
@@ -1378,10 +1458,13 @@ static void bcf_read_local_init(duckdb_init_info info) {
     }
 
     // Set up region query if user specified a region (non-parallel case)
-    if (!is_parallel && bind->n_regions > 0) {
+    if (!is_parallel && bind->has_selector) {
         char region_error[256];
-        if (!duckhts_bcf_scan_regions(&local->scan, bind->regions, bind->n_regions,
-                                      region_error, sizeof(region_error))) {
+        int selected = bind->typed_regions
+            ? duckhts_bcf_scan_intervals(&local->scan, &bind->plan, region_error, sizeof(region_error))
+            : duckhts_bcf_scan_regions(&local->scan, bind->regions, bind->n_regions,
+                                       region_error, sizeof(region_error));
+        if (!selected) {
             duckdb_init_set_error(info, region_error);
             destroy_init_data(local);
             return;
@@ -1594,6 +1677,14 @@ static void bcf_read_function(duckdb_function_info info, duckdb_data_chunk outpu
                 break;
             }
 
+            /* Sequential reads and index iterators (hts_itr_next and
+             * hts_itr_multi_next) all return with the BGZF position just past
+             * the record they return, and an exhausted block reads as the next
+             * block's start, so every scan path gives a record the same value. */
+            if (init->file_offset_projected && init->file_offset_bgzf) {
+                init->record_end_offset = (uint64_t)bgzf_tell(init->scan.fp->fp.bgzf);
+            }
+
             if (init->unpack_mask) {
                 bcf_unpack(init->rec, init->unpack_mask);
             }
@@ -1723,6 +1814,17 @@ static void bcf_read_function(duckdb_function_info info, duckdb_data_chunk outpu
                 if (!duckhts_bcf_filter_write(vec, row_idx, init->scan.hdr, init->rec,
                                                scan_err, sizeof(scan_err)))
                     goto materialization_error;
+                break;
+            }
+            case BCF_OUT_FILE_OFFSET: {
+                if (!init->file_offset_bgzf) {
+                    duckdb_vector_ensure_validity_writable(vec);
+                    uint64_t* validity = duckdb_vector_get_validity(vec);
+                    set_validity_bit(validity, row_idx, 0);
+                    break;
+                }
+                uint64_t* data = (uint64_t*)duckdb_vector_get_data(vec);
+                data[row_idx] = init->record_end_offset;
                 break;
             }
             case BCF_OUT_VEP: {
@@ -2018,9 +2120,15 @@ void register_read_bcf_function(duckdb_connection connection) {
     duckdb_table_function_add_named_parameter(tf, "tidy_format", bool_type);  // optional tidy format
     duckdb_table_function_add_named_parameter(tf, "additional_csq_column_types", varchar_type);  // optional bcftools-style CSQ/ANN/BCSQ type overrides
     duckdb_table_function_add_named_parameter(tf, "decompression_threads", bigint_type);  // optional htslib worker threads
+    {
+        duckdb_logical_type regions_type = duckhts_regions_parameter_type();
+        duckdb_table_function_add_named_parameter(tf, "regions", regions_type);
+        duckdb_destroy_logical_type(&regions_type);
+    }
     duckdb_table_function_add_named_parameter(tf, "scan_mode", varchar_type);  // 'auto' or 'sequential'
     duckdb_table_function_add_named_parameter(tf, "decode_error_policy", varchar_type);  // 'null', 'warn', or 'error'
     duckdb_table_function_add_named_parameter(tf, "samples", varchar_type);
+    duckdb_table_function_add_named_parameter(tf, "include_file_offset", bool_type);  // optional FILE_OFFSET column
     duckdb_destroy_logical_type(&varchar_type);
     duckdb_destroy_logical_type(&bool_type);
     duckdb_destroy_logical_type(&bigint_type);

@@ -1,0 +1,469 @@
+#' Find Runs of Homozygosity
+#'
+#' Detect runs of homozygosity in a VCF or BCF with the two-state hidden Markov
+#' model of `bcftools roh`: an autozygous state and a Hardy-Weinberg state,
+#' decoded with the Viterbi algorithm. Segments, marker counts and start and end
+#' positions equal `bcftools roh`; quality is the mean forward-backward phred
+#' score, equal to the one decimal `bcftools` prints. The model is a port of
+#' `vcfroh.c` and `HMM.c` (MIT, Genome Research Ltd), run by the native
+#' `duckhts_roh_segments()` kernel over one list per sample and chromosome.
+#'
+#' Allele frequencies come from an INFO tag (`af_tag`, like `--AF-tag`, which
+#' must be declared `Type=Float,Number=A`) or from a relation (`af_table`, like
+#' `--AF-file`) with columns `chrom`, `pos`, `ref`, `alt` and `af`, matched to
+#' each record by chromosome, position, REF and its ALT alleles joined by commas.
+#' Sites without a usable frequency (absent, missing or exactly 0) are skipped,
+#' as are records with more than one ALT or none. With `af_table`,
+#' `site_rule = "bcftools"` chooses the record of a repeated position as
+#' `bcftools roh --AF-file` does (see the argument).
+#'
+#' Alternatively, `reference_table` and `proportions_table` select the
+#' ancestry-tuned path. The reference is long-format with columns `chromosome`,
+#' `position`, `allele_a`, `allele_b`, `group_id` and `frequency` (frequency of
+#' `allele_b`); proportions have `sample_id`, `group_id` and `proportion`.
+#' Their group sets must match exactly, and each VCF sample must have a
+#' proportions row for every group. Per-site AF is the sum of each group's
+#' frequency weighted by the sample's proportion, with the proportions divided
+#' by their sum (which must be above 0 and at most 1, so `sum_to_one = FALSE`
+#' results and rounded proportions are accepted). REF=`allele_a`, ALT=`allele_b`
+#' uses that AF; reversed alleles use `1 - AF`. Reference alleles must be on
+#' the forward strand of the VCF's assembly, as in a FASTA-anchored panel; no
+#' strand flip is attempted, so palindromic (A/T, C/G) sites are oriented by REF
+#' like any other, and a record whose alleles match neither order is not used
+#' and does not claim a repeated position.
+#' Contig names are matched with `duckhts_contig_key()` once per distinct name
+#' (one leading `chr` removed, M/MT written as MT, X and Y uppercased), so
+#' `chr1` and `1` match, as do `chrX` and `X`; accessions, patches and numeric
+#' sex chromosomes are not mapped. `af_clamp` limits nonzero-clamp frequencies to
+#' `[af_clamp, 1-af_clamp]`; the default keeps zero population frequencies from
+#' being treated as impossible, and zero disables clamping. Only called sites
+#' are frequency-weighted. Supply exactly one frequency source: `af_tag`,
+#' `af_table`, or both ancestry relations.
+#'
+#' Genotype evidence is FORMAT/PL unless `gt_error` is given, which uses the
+#' diploid GT calls with that phred error (`-G`) and needs no PL. With no
+#' recombination map, transitions are the per-base-pair probabilities
+#' `hw_to_az` and `az_to_hw` compounded over the physical distance between
+#' sites, exactly as `bcftools roh` does without `-m` or `-M`. `rec_rate` is a
+#' constant rate per base pair (`-M`). `genetic_map` names a relation with
+#' columns `chrom`, `pos` and `cm` (cumulative centimorgans, the IMPUTE2
+#' format), interpolated as `-m` does; chromosomes it does not cover are
+#' skipped.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded.
+#' @param path One VCF/BCF path or URI.
+#' @param af_tag INFO tag holding the ALT allele frequency, for example `"AF"`.
+#' @param af_table Name of a table or view of site allele frequencies, instead
+#'   of `af_tag` or the ancestry inputs.
+#' @param reference_table Long-format reference with chromosome, position,
+#'   allele_a, allele_b, group_id and frequency columns.
+#' @param proportions_table Long-format sample ancestry proportions with
+#'   sample_id, group_id and proportion columns. Its group set must exactly
+#'   match `reference_table`.
+#' @param af_clamp Clamp ancestry-tuned frequencies to `[af_clamp, 1-af_clamp]`;
+#'   zero disables clamping. Must be in `[0, 0.5)`.
+#' @param genetic_map Optional name of a genetic-map table or view.
+#' @param hw_to_az,az_to_hw Per-base-pair transition probabilities
+#'   Hardy-Weinberg to autozygous (`-a`) and back (`-H`), each in `[0, 1]`.
+#' @param gt_error Optional phred error for GT-only emissions (`-G`), at least 0.
+#' @param rec_rate Optional constant recombination rate per base pair (`-M`).
+#' @param samples Optional HTSlib sample selector: comma-separated inclusion,
+#'   leading `^` exclusion, `"-"` for all, or `""` for none.
+#' @param table_name Optional output table. `NULL` returns a data frame.
+#' @param overwrite Whether an existing output table may be replaced.
+#' @param max_sites Most sites one sample and chromosome may hold, from 1 to
+#'   100,000,000. A larger group is an error.
+#' @param max_site_bytes Bound on the bytes the site buffers hold at once (16
+#'   bytes per site, 24 for read counts). A decode does not grow a buffer when
+#'   the bytes held by all ROH decodes in the process would pass its own
+#'   `max_site_bytes`; decodes that run at the same time with different values
+#'   each apply their own. Exceeding it is an error: decode fewer samples per
+#'   call or raise it.
+#' @param site_rule Which record of a position listed in `af_table` gives its
+#'   site. `"matching"` (the default) uses a record whose REF and ALT match a
+#'   row of `af_table` (`duckhts_roh_af_table`). `"bcftools"` follows
+#'   `bcftools roh --AF-file` (`duckhts_roh_af_table_bcftools`): in file order,
+#'   a record of the other indel class than the row is passed over when the
+#'   next record of the file has the same POS (on any contig); a record with no
+#'   non-symbolic ALT, or several, claims nothing; and the first remaining
+#'   record claims the position, which is skipped unless its alleles equal the
+#'   row's (also when its first ALT is symbolic, which bcftools would decode
+#'   through the second ALT). It needs one `af_table` row per position, unless
+#'   `af_order` gives file order, and a sorted, BGZF-compressed VCF or BCF, and
+#'   reads the file a second time without samples. Only `af_table` takes
+#'   `"bcftools"`.
+#' @param af_order Optional name of a column of `af_table` that gives file
+#'   order, for example a line number added by the caller, or `FILE_OFFSET`
+#'   when the frequencies come from `read_bcf()`. With `site_rule = "bcftools"`
+#'   only. Several rows may then share a position: the row with the least
+#'   value is used, as `bcftools roh --AF-file` reads the first line of a
+#'   position. A `NULL` value, a value repeated within a position, or a name
+#'   that is not a column of `af_table` is an error.
+#' @return A data frame (or invisible `TRUE` when `table_name` is given) with one
+#'   row per run: `sample`, `chrom`, `start` and `end` (one-based, inclusive,
+#'   the first and last marker), `length` (`end - start + 1`), `n_markers` and
+#'   `quality`. Rows are unordered.
+#' @examples
+#' con <- rduckhts_connect()
+#' path <- system.file("extdata", "roh_fixture.vcf.gz", package = "Rduckhts")
+#' roh <- rduckhts_roh(con, path, af_tag = "AF")
+#' roh[order(roh$sample, roh$chrom, roh$start), ]
+#' DBI::dbDisconnect(con, shutdown = TRUE)
+#' @export
+rduckhts_roh <- function(
+  con, path, af_tag = NULL, af_table = NULL, genetic_map = NULL,
+  hw_to_az = 6.7e-8, az_to_hw = 5e-9, gt_error = NULL, rec_rate = NULL,
+  samples = NULL, table_name = NULL, overwrite = FALSE,
+  reference_table = NULL, proportions_table = NULL, af_clamp = 1e-3,
+  max_sites = 2e7, max_site_bytes = 2^32, site_rule = "matching",
+  af_order = NULL
+) {
+  .somalier_validate_output(con, table_name, overwrite)
+  .somalier_scalar_text(path, "path")
+  if (!is.character(site_rule) || length(site_rule) != 1L || is.na(site_rule) ||
+      !site_rule %in% c("matching", "bcftools")) {
+    stop("site_rule must be \"matching\" or \"bcftools\"", call. = FALSE)
+  }
+  if (site_rule != "matching" && is.null(af_table)) {
+    stop("site_rule = \"bcftools\" needs af_table", call. = FALSE)
+  }
+  if (!is.null(af_order)) {
+    .somalier_scalar_text(af_order, "af_order")
+    if (site_rule != "bcftools") {
+      stop("af_order needs site_rule = \"bcftools\"", call. = FALSE)
+    }
+  }
+  source <- .roh_frequency_source(con, af_tag, af_table, reference_table,
+                                  proportions_table, af_clamp)
+  options <- .roh_validated_options(genetic_map, hw_to_az, az_to_hw, gt_error,
+                                   rec_rate, samples)
+  arguments <- c(
+    sql_quote_string(con, path), source$arguments,
+    if (!is.null(options$genetic_map)) sql_quote_string(con, options$genetic_map),
+    paste0("hw_to_az := ", options$hw_to_az),
+    paste0("az_to_hw := ", options$az_to_hw),
+    if (!is.null(options$gt_error)) paste0("gt_error := ", options$gt_error),
+    if (!is.null(options$rec_rate)) paste0("rec_rate := ", options$rec_rate),
+    if (source$ancestry) paste0("af_clamp := ", source$af_clamp),
+    if (!is.null(options$samples)) {
+      paste0("samples := ", sql_quote_string(con, options$samples))
+    },
+    .roh_limit_arguments(max_sites, max_site_bytes),
+    if (!is.null(af_order)) paste0("af_order := ", sql_quote_string(con, af_order))
+  )
+  macro <- if (site_rule == "bcftools") "duckhts_roh_af_table_bcftools" else source$macro
+  if (!is.null(options$genetic_map)) macro <- paste0(macro, "_map")
+  query <- paste0("SELECT * FROM ", macro, "(",
+                  paste(arguments, collapse = ", "), ")")
+  .somalier_publish_query(con, query, table_name, overwrite)
+}
+
+#' Find Runs of Homozygosity from Read Counts
+#'
+#' Detect runs of homozygosity from allele read counts, for example counts at
+#' panel sites from a BAM or CRAM, with the two-state model and transitions of
+#' [rduckhts_roh()]. Genotype likelihoods come from a binomial read model with a
+#' per-read sequencing error and an optional contamination fraction instead of
+#' FORMAT/PL or GT. This emission is a DuckHTS extension; `bcftools roh` has no
+#' read-count mode.
+#'
+#' `counts_table` names a table or view with columns `sample_id`, `chrom`, `pos`
+#' (one-based), `ref_count`, `alt_count` and `af`, one row per sample and site.
+#' `alt_count` counts reads that show the allele whose population frequency is
+#' `af`; `ref_count` counts reads that show the other allele. The frequency can
+#' come from any source joined in SQL beforehand: an INFO tag, a frequency
+#' table or ancestry-weighted frequencies. Somalier site counts map as
+#' `ref_count = a`, `alt_count = b`, with `af` the frequency of `allele_b`.
+#'
+#' Each read shows the counted allele with probability
+#' `(1 - contamination) * q + contamination * c`, where `q` is `seq_error`,
+#' `allele_balance` or `1 - seq_error` for zero, one or two copies, and `c` is
+#' the mean of `q` over the genotype of a contaminating individual of the same
+#' population (Hardy-Weinberg at `af`). With chance `artefact_weight` a site's
+#' counted reads are instead uniform on `0..depth`, whatever its genotype. The
+#' four numbers mean what [rduckhts_count_error_fit()] reports under these
+#' names. Without the contamination term, contaminant reads at homozygous sites
+#' look like heterozygous evidence, which shortens runs and lowers FROH.
+#'
+#' Sites with no reads, a NULL count, or an `af` that is NULL, NaN or 0 are
+#' skipped; a repeated position keeps one row. Negative counts are an error.
+#' The model assumes biallelic sites, independent reads (no duplicate or
+#' strand modelling) and one error rate for all reads. Reference-biased
+#' mapping makes the other allele of a heterozygote rarer; `allele_balance`
+#' takes one value per sample, while the bias is stronger where flanking
+#' heterozygosity is high, so such heterozygotes can still look homozygous and
+#' lengthen runs in divergent regions. The contamination fraction is supplied
+#' by the caller, for example from [rduckhts_count_error_fit()]. A contaminant
+#' from a different population than `af` describes is approximated by `af`.
+#'
+#' `seq_error` is an error of one read, and the reads of a site multiply. With
+#' `artefact_weight = 0`, a site with balanced reads excludes both homozygous
+#' genotypes whatever `seq_error` is: the decode then corresponds to the
+#' genotype decode with no tolerated genotype error, and reports fewer bases in
+#' runs than `rduckhts_roh(gt_error = 30)` on the same sample. With
+#' `artefact_weight = w > 0`, one site at depth `d` changes the odds between
+#' the two states by a factor of at most `1 + (d + 1) * (1 - w) / w`, as
+#' `gt_error` caps one called genotype at `10^(gt_error / 10)`.
+#'
+#' The runs depend on `artefact_weight` more than on the other fitted numbers.
+#' With `fit_table`, each sample is therefore decoded three times from one
+#' collection of its sites: at its `artefact_weight` `w`, and at
+#' `w - artefact_weight_sd` and `w + artefact_weight_sd`, each kept in
+#' `[0, 0.05]`. Each run of the decode at `w` gets `stable_fraction`: the share
+#' of its bases that are also in a run of both other decodes. A run with
+#' `stable_fraction` 1 does not depend on where `w` lies within one standard
+#' error. Filter on it to keep the runs, or the run bases, that the interval
+#' of the fit does not move; a low value marks a run whose call hinges on the
+#' artefact weight.
+#'
+#' `gained_bases` guards the other direction: the bases that the decode at
+#' `w + artefact_weight_sd` calls next to the run but outside every run at
+#' `w`. A run at `w + sd` meets a run at `w` when they share a base or abut. A
+#' base of such a run before the first run at `w` it meets counts for that run;
+#' any other counts for the run at `w` before it, so a gap that the higher
+#' weight closes between two runs counts once, for the run before the gap. A
+#' run at `w + sd` that meets no run at `w` has no row, so its bases are not
+#' reported. A high `gained_bases` marks a run that a higher weight would
+#' extend or join to its neighbour.
+#'
+#' A NULL `artefact_weight_sd` (fewer than three blocks in the fit) counts as
+#' 0 and gives `stable_fraction` 1 and `gained_bases` 0, so check the fit's
+#' `blocks` too. The decode then takes about three times as long.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded.
+#' @param counts_table Name of a table or view of read counts (see Details).
+#' @param fit_table Optional table or view with one row per `sample`, containing
+#'   non-NULL `seq_error`, `contamination`, `allele_balance` and
+#'   `artefact_weight`, and an `artefact_weight_sd` column, such as the output
+#'   of [rduckhts_count_error_fit()]. These replace the scalar arguments for
+#'   each matching `sample_id`. A sample of `counts_table` with no fit row,
+#'   several fit rows, a NULL value or a value out of range is an error; fit
+#'   rows of other samples are not checked. A NULL `artefact_weight_sd` counts
+#'   as 0. Filter fit status in the caller's SQL; the spreads are not used.
+#' @param seq_error Per-read probability of showing the other allele, in
+#'   `(0, 0.5)`.
+#' @param contamination Fraction of reads from a contaminating individual, in
+#'   `[0, 1)`.
+#' @param allele_balance Share of a heterozygote's reads that show the counted
+#'   allele, in `[0.35, 0.65]`. The default 0.5 assumes no mapping bias.
+#' @param artefact_weight Chance that a site's counts are uniform on
+#'   `0..depth` whatever its genotype, in `[0, 0.05]`. The default 0 gives
+#'   such sites no term. Values outside either range are errors, not clipped.
+#' @inheritParams rduckhts_roh
+#' @return A data frame (or invisible `TRUE` when `table_name` is given) with
+#'   the columns of [rduckhts_roh()]: one row per run, unordered. With
+#'   `fit_table` it also has `stable_fraction` and `gained_bases` (see
+#'   Details).
+#' @examples
+#' con <- rduckhts_connect()
+#' DBI::dbExecute(con, paste(
+#'   "CREATE TEMP TABLE counts AS SELECT 'S1' AS sample_id, '1' AS chrom,",
+#'   "i * 25000 AS pos, 0.5 AS af,",
+#'   "CASE WHEN i BETWEEN 40 AND 120 OR i % 2 = 0 THEN 30 ELSE 15 END AS ref_count,",
+#'   "CASE WHEN i BETWEEN 40 AND 120 OR i % 2 = 0 THEN 0 ELSE 15 END AS alt_count",
+#'   "FROM range(1, 161) AS t(i)"
+#' ))
+#' rduckhts_roh_counts(con, "counts")
+#' DBI::dbDisconnect(con, shutdown = TRUE)
+#' @export
+rduckhts_roh_counts <- function(
+  con, counts_table, seq_error = 1e-3, contamination = 0, genetic_map = NULL,
+  hw_to_az = 6.7e-8, az_to_hw = 5e-9, rec_rate = NULL,
+  table_name = NULL, overwrite = FALSE, max_sites = 2e7, max_site_bytes = 2^32,
+  fit_table = NULL, allele_balance = 0.5, artefact_weight = 0
+) {
+  .somalier_validate_output(con, table_name, overwrite)
+  .somalier_validate_name(counts_table, "counts_table")
+  if (!is.null(fit_table)) .somalier_validate_name(fit_table, "fit_table")
+  if (is.null(fit_table) && (!is.numeric(seq_error) || length(seq_error) != 1L || !is.finite(seq_error) ||
+      seq_error <= 0 || seq_error >= 0.5)) {
+    stop("seq_error must be one finite number in (0, 0.5)", call. = FALSE)
+  }
+  if (is.null(fit_table) && (!is.numeric(contamination) || length(contamination) != 1L ||
+      !is.finite(contamination) || contamination < 0 || contamination >= 1)) {
+    stop("contamination must be one finite number in [0, 1)", call. = FALSE)
+  }
+  if (is.null(fit_table) && (!is.numeric(allele_balance) || length(allele_balance) != 1L ||
+      !is.finite(allele_balance) || allele_balance < 0.35 || allele_balance > 0.65)) {
+    stop("allele_balance must be one finite number in [0.35, 0.65]", call. = FALSE)
+  }
+  if (is.null(fit_table) && (!is.numeric(artefact_weight) || length(artefact_weight) != 1L ||
+      !is.finite(artefact_weight) || artefact_weight < 0 || artefact_weight > 0.05)) {
+    stop("artefact_weight must be one finite number in [0, 0.05]", call. = FALSE)
+  }
+  options <- .roh_validated_options(genetic_map, hw_to_az, az_to_hw, NULL,
+                                   rec_rate, NULL)
+  arguments <- c(
+    sql_quote_string(con, counts_table),
+    if (!is.null(fit_table)) sql_quote_string(con, fit_table),
+    if (!is.null(options$genetic_map)) sql_quote_string(con, options$genetic_map),
+    if (is.null(fit_table)) c(
+      paste0("seq_error := ", sprintf("%.17g", seq_error)),
+      paste0("contamination := ", sprintf("%.17g", contamination)),
+      paste0("allele_balance := ", sprintf("%.17g", allele_balance)),
+      paste0("artefact_weight := ", sprintf("%.17g", artefact_weight))
+    ),
+    paste0("hw_to_az := ", options$hw_to_az),
+    paste0("az_to_hw := ", options$az_to_hw),
+    if (!is.null(options$rec_rate)) paste0("rec_rate := ", options$rec_rate),
+    .roh_limit_arguments(max_sites, max_site_bytes)
+  )
+  macro <- if (is.null(fit_table)) "duckhts_roh_counts" else "duckhts_roh_counts_fitted"
+  if (!is.null(options$genetic_map)) macro <- paste0(macro, "_map")
+  query <- paste0("SELECT * FROM ", macro, "(", paste(arguments, collapse = ", "), ")")
+  .somalier_publish_query(con, query, table_name, overwrite)
+}
+
+.roh_frequency_source <- function(con, af_tag, af_table, reference_table,
+                                proportions_table, af_clamp) {
+  ancestry <- !is.null(reference_table) || !is.null(proportions_table)
+  if (ancestry && (is.null(reference_table) || is.null(proportions_table))) {
+    stop("reference_table and proportions_table must be supplied together", call. = FALSE)
+  }
+  sources <- sum(!is.null(af_tag), !is.null(af_table), ancestry)
+  if (sources != 1L) {
+    stop("supply exactly one of af_tag, af_table, or ancestry relations", call. = FALSE)
+  }
+  if (!is.null(af_tag)) .somalier_scalar_text(af_tag, "af_tag")
+  if (!is.null(af_table)) .somalier_validate_name(af_table, "af_table")
+  if (ancestry) {
+    .somalier_validate_name(reference_table, "reference_table")
+    .somalier_validate_name(proportions_table, "proportions_table")
+    af_clamp <- .roh_number(af_clamp, "af_clamp", maximum = 0.49999999999999994)
+    arguments <- c(sql_quote_string(con, reference_table),
+                   sql_quote_string(con, proportions_table))
+    macro <- "duckhts_roh_ancestry"
+  } else {
+    arguments <- sql_quote_string(con, if (is.null(af_tag)) af_table else af_tag)
+    macro <- if (is.null(af_tag)) "duckhts_roh_af_table" else "duckhts_roh"
+  }
+  list(ancestry = ancestry, af_clamp = af_clamp, arguments = arguments, macro = macro)
+}
+
+.roh_validated_options <- function(genetic_map, hw_to_az, az_to_hw, gt_error,
+                                   rec_rate, samples) {
+  if (!is.null(genetic_map)) .somalier_validate_name(genetic_map, "genetic_map")
+  if (!is.null(samples)) .somalier_scalar_text(samples, "samples", allow_empty = TRUE)
+  list(
+    genetic_map = genetic_map,
+    hw_to_az = .roh_number(hw_to_az, "hw_to_az", maximum = 1),
+    az_to_hw = .roh_number(az_to_hw, "az_to_hw", maximum = 1),
+    gt_error = if (is.null(gt_error)) NULL else .roh_number(gt_error, "gt_error"),
+    rec_rate = if (is.null(rec_rate)) NULL else .roh_number(rec_rate, "rec_rate"),
+    samples = samples
+  )
+}
+
+# The two memory limits as SQL arguments: whole numbers of at least 1.
+.roh_limit_arguments <- function(max_sites, max_site_bytes) {
+  limits <- list(max_sites = max_sites, max_site_bytes = max_site_bytes)
+  for (name in names(limits)) {
+    value <- limits[[name]]
+    if (!is.numeric(value) || length(value) != 1L || !is.finite(value) ||
+        value < 1 || value != floor(value) || value > 2^53) {
+      stop(name, " must be one whole number of at least 1", call. = FALSE)
+    }
+  }
+  if (max_sites > 1e8) stop("max_sites must be at most 100000000", call. = FALSE)
+  sprintf("%s := %s", names(limits),
+          vapply(limits, format, character(1L), scientific = FALSE, trim = TRUE))
+}
+
+# A finite number in [0, maximum], formatted with full precision for SQL.
+.roh_number <- function(value, name, maximum = Inf) {
+  if (!is.numeric(value) || length(value) != 1L || !is.finite(value) ||
+      value < 0 || value > maximum) {
+    stop(name, " must be one finite number in [0, ",
+         if (is.finite(maximum)) format(maximum) else "Inf", "]", call. = FALSE)
+  }
+  sprintf("%.17g", value)
+}
+
+#' Fit Read Error and Contamination from Allele Read Counts
+#'
+#' Fits, for each sample, the read error, the share of reads from a second
+#' genome, the allele balance at heterozygous sites, two spreads, an artefact
+#' weight and an excess of homozygosity by maximum likelihood from allele read
+#' counts at sites of known population frequency. The input is the relation of
+#' [rduckhts_roh_counts()]; the fit is meant to supply that decode's
+#' `seq_error` and `contamination`.
+#'
+#' The likelihood depends on a site only through its two counts and its
+#' frequency, so the fit runs on a histogram of (block, frequency bin, depth,
+#' alt count) cells that DuckDB builds and the native code holds in a bounded
+#' buffer. Each block of `block_bases` bases with at least `min_block_sites`
+#' sites is refitted for contamination with the other parameters held, and
+#' `contamination_sd` is the standard deviation of those block estimates
+#' divided by the square root of their number: an interval from the blocks,
+#' not from the likelihood, because sites are linked. Each such block is also
+#' refitted for the artefact weight alone, and `artefact_weight_sd` is formed
+#' the same way; both are NA with fewer than three blocks.
+#' [rduckhts_roh_counts()] with `fit_table` uses `artefact_weight_sd` for its
+#' `stable_fraction`. The same cells are also
+#' fitted with a parent or child as the second genome
+#' (`contamination_relative`, `log_likelihood_relative`), since the unrelated
+#' model gives a relative about half its share.
+#'
+#' `homozygosity_excess` is a nuisance parameter: it also absorbs a difference
+#' between the sample's population and the frequencies given, so it is not
+#' inbreeding. A second genome of another population biases `contamination`
+#' upward under the receiver's frequencies.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded.
+#' @param counts_table Name of a table or view with `sample_id`, `chrom`,
+#'   `pos`, `ref_count`, `alt_count` and `af`, as for [rduckhts_roh_counts()].
+#' @param block_bases Bases per block for the block refits, at least 1.
+#' @param freq_bins Frequency bins of the histogram, 1 to 1024.
+#' @param max_depth Sites with more reads are left out, 1 to 65535.
+#' @param min_block_sites Sites a block needs to be refitted, at least 1.
+#' @param max_cells Most histogram cells of one sample; an error above it.
+#' @param max_cell_bytes Most bytes the histogram buffers of all fits in the
+#'   process hold at once; an error above it.
+#' @inheritParams rduckhts_roh
+#' @return A data frame (or invisible `TRUE` when `table_name` is given) with
+#'   one row per sample: `sample`, `sites`, `reads`, `mean_depth`, `blocks`,
+#'   `seq_error`, `contamination`, `contamination_sd`, `homozygosity_excess`,
+#'   `allele_balance`, `spread_hom`, `spread_het`, `artefact_weight`,
+#'   `artefact_weight_sd`, `log_likelihood`, `contamination_relative`, `log_likelihood_relative`,
+#'   `status` (`ok`, `no_sites` for a sample whose sites were all skipped,
+#'   `few_sites`, `few_blocks`, `at_bound`, `no_convergence` or
+#'   `no_convergence_relative`) and `method`.
+#' @examples
+#' con <- rduckhts_connect()
+#' DBI::dbExecute(con, paste(
+#'   "CREATE TEMP TABLE counts AS SELECT 'S1' AS sample_id, '1' AS chrom,",
+#'   "i * 2500 AS pos, 0.1 + 0.8 * ((i * 37) % 100) / 100.0 AS af,",
+#'   "30 - ((i * 7) % 3) * 15 AS ref_count, ((i * 7) % 3) * 15 AS alt_count",
+#'   "FROM range(1, 4001) AS t(i)"
+#' ))
+#' rduckhts_count_error_fit(con, "counts")[, c("sample", "seq_error", "contamination", "status")]
+#' DBI::dbDisconnect(con, shutdown = TRUE)
+#' @export
+rduckhts_count_error_fit <- function(
+  con, counts_table, block_bases = 1e7, freq_bins = 64, max_depth = 1000,
+  min_block_sites = 1000, table_name = NULL, overwrite = FALSE,
+  max_cells = 5e6, max_cell_bytes = 2^30
+) {
+  .somalier_validate_output(con, table_name, overwrite)
+  .somalier_validate_name(counts_table, "counts_table")
+  whole <- function(value, name, low, high) {
+    if (!is.numeric(value) || length(value) != 1L || !is.finite(value) ||
+        value != floor(value) || value < low || value > high) {
+      stop(sprintf("%s must be one whole number from %s to %s", name,
+                   format(low, scientific = FALSE), format(high, scientific = FALSE)), call. = FALSE)
+    }
+    sprintf("%.0f", value)
+  }
+  arguments <- c(
+    sql_quote_string(con, counts_table),
+    paste0("block_bases := ", whole(block_bases, "block_bases", 1, 2^62)),
+    paste0("freq_bins := ", whole(freq_bins, "freq_bins", 1, 1024)),
+    paste0("max_depth := ", whole(max_depth, "max_depth", 1, 65535)),
+    paste0("min_block_sites := ", whole(min_block_sites, "min_block_sites", 1, 2^62)),
+    paste0("max_cells := ", whole(max_cells, "max_cells", 1, 1e8)),
+    paste0("max_cell_bytes := ", whole(max_cell_bytes, "max_cell_bytes", 1, 2^62))
+  )
+  query <- paste0("SELECT * FROM duckhts_count_error_fit(",
+                  paste(arguments, collapse = ", "), ")")
+  .somalier_publish_query(con, query, table_name, overwrite)
+}

@@ -1,6 +1,32 @@
 # DuckHTS SQL wrapper functions. Keep transport and native computation in the
 # extension; these functions validate R inputs and compose SQL relations.
 
+.duckhts_check_table_target <- function(con, table_name, overwrite) {
+  if (!missing(table_name) && !is.null(table_name) && !overwrite &&
+      DBI::dbExistsTable(con, table_name)) {
+    stop(
+      "Table '",
+      table_name,
+      "' already exists. Use overwrite = TRUE to replace it."
+    )
+  }
+}
+
+.duckhts_create_table <- function(con, table_name, select_sql, overwrite) {
+  .duckhts_check_table_target(con, table_name, overwrite)
+  prefix <- if (overwrite) "CREATE OR REPLACE TABLE" else "CREATE TABLE"
+  DBI::dbExecute(
+    con,
+    sprintf(
+      "%s %s AS %s",
+      prefix,
+      sql_quote_identifier(con, table_name),
+      select_sql
+    )
+  )
+  invisible(TRUE)
+}
+
 #' Create VCF/BCF Table
 #'
 #' Creates a DuckDB table from a VCF or BCF file using the DuckHTS extension.
@@ -30,6 +56,24 @@
 #' @param samples Optional HTSlib sample selector: `NULL` or `"-"` keeps all,
 #'   `""` keeps none, comma-separated names include samples, and a leading
 #'   `"^"` excludes them. Unknown names error; selected samples retain header order.
+#' @param regions_var Optional name of a session variable on `con` that holds
+#'   typed intervals, `STRUCT(chrom VARCHAR, start BIGINT, "end" BIGINT)[]`
+#'   with 0-based half-open coordinates (a VCF position `p` is `[p - 1, p)`).
+#'   The name is quoted into `regions := getvariable('<name>')`; create the
+#'   variable with `SET VARIABLE` on the same connection. A `NULL` variable
+#'   value keeps the ordinary scan, an empty list selects no records, and
+#'   `region` and `regions_var` are mutually exclusive. Typed regions need an
+#'   index and are incompatible with `scan_mode = "sequential"`. Chromosome
+#'   names are literal (not region expressions); overlapping and adjacent
+#'   intervals are merged natively. Limits: 1,000,000 intervals and 128 MiB.
+#'   Aggregate with `coalesce(list(...), []::STRUCT(...)[])`: `list()` over no
+#'   rows is `NULL`, which means the ordinary full scan.
+#' @param include_file_offset Logical. If `TRUE`, add a `FILE_OFFSET` column
+#'   after `FILTER`: the BGZF virtual position just after each record. It
+#'   increases strictly in file order and is the same for every scan mode, so
+#'   ordering by it restores file order, also among records at one position.
+#'   Input that is not BGZF-compressed gives `NA`. The default keeps the
+#'   existing schema.
 #'
 #' @return Invisible TRUE on success
 #'
@@ -56,25 +100,23 @@ rduckhts_bcf <- function(
   decompression_threads = 0,
   decode_error_policy = "null",
   overwrite = FALSE,
-  samples = NULL
+  samples = NULL,
+  regions_var = NULL,
+  include_file_offset = FALSE
 ) {
-  if (!missing(table_name) && !is.null(table_name)) {
-    if (DBI::dbExistsTable(con, table_name) && !overwrite) {
-      stop(
-        "Table '",
-        table_name,
-        "' already exists. Use overwrite = TRUE to replace it."
-      )
-    }
-    if (DBI::dbExistsTable(con, table_name)) {
-      DBI::dbRemoveTable(con, table_name)
-    }
+  if (!is.logical(include_file_offset) || length(include_file_offset) != 1L ||
+      is.na(include_file_offset)) {
+    stop("include_file_offset must be TRUE or FALSE", call. = FALSE)
   }
-
+  .duckhts_check_table_target(con, table_name, overwrite)
   params <- list()
+  if (include_file_offset) params$include_file_offset <- "true"
   if (!is.null(samples)) params$samples <- sql_quote_string(con, samples)
   if (!is.null(region)) {
     params$region <- sql_quote_string(con, region)
+  }
+  if (!is.null(regions_var)) {
+    params$regions <- .duckhts_regions_expression(con, regions_var)
   }
   if (!is.null(index_path)) {
     params$index_path <- sql_quote_string(con, index_path)
@@ -127,22 +169,16 @@ rduckhts_bcf <- function(
 
   param_str <- build_param_str(params)
 
+  select_sql <- sprintf(
+    "SELECT * FROM read_bcf(%s%s)",
+    sql_quote_string(con, path),
+    param_str
+  )
   if (!is.null(table_name)) {
-    create_query <- sprintf(
-      "CREATE TABLE %s AS SELECT * FROM read_bcf(%s%s)",
-      sql_quote_identifier(con, table_name),
-      sql_quote_string(con, path),
-      param_str
-    )
+    .duckhts_create_table(con, table_name, select_sql, overwrite)
   } else {
-    create_query <- sprintf(
-      "CREATE VIEW bcf_data AS SELECT * FROM read_bcf(%s%s)",
-      sql_quote_string(con, path),
-      param_str
-    )
+    DBI::dbExecute(con, paste("CREATE VIEW bcf_data AS", select_sql))
   }
-
-  DBI::dbExecute(con, create_query)
   invisible(TRUE)
 }
 
@@ -206,19 +242,7 @@ rduckhts_bam <- function(
   decompression_threads = 2,
   overwrite = FALSE
 ) {
-  if (!missing(table_name) && !is.null(table_name)) {
-    if (DBI::dbExistsTable(con, table_name) && !overwrite) {
-      stop(
-        "Table '",
-        table_name,
-        "' already exists. Use overwrite = TRUE to replace it."
-      )
-    }
-    if (DBI::dbExistsTable(con, table_name)) {
-      DBI::dbRemoveTable(con, table_name)
-    }
-  }
-
+  .duckhts_check_table_target(con, table_name, overwrite)
   params <- list()
   if (!is.null(region)) {
     params$region <- sql_quote_string(con, region)
@@ -265,22 +289,16 @@ rduckhts_bam <- function(
 
   param_str <- build_param_str(params)
 
+  select_sql <- sprintf(
+    "SELECT * FROM read_bam(%s%s)",
+    sql_quote_string(con, path),
+    param_str
+  )
   if (!is.null(table_name)) {
-    create_query <- sprintf(
-      "CREATE TABLE %s AS SELECT * FROM read_bam(%s%s)",
-      sql_quote_identifier(con, table_name),
-      sql_quote_string(con, path),
-      param_str
-    )
+    .duckhts_create_table(con, table_name, select_sql, overwrite)
   } else {
-    create_query <- sprintf(
-      "CREATE VIEW bam_data AS SELECT * FROM read_bam(%s%s)",
-      sql_quote_string(con, path),
-      param_str
-    )
+    DBI::dbExecute(con, paste("CREATE VIEW bam_data AS", select_sql))
   }
-
-  DBI::dbExecute(con, create_query)
   invisible(TRUE)
 }
 
@@ -314,19 +332,7 @@ rduckhts_pileup <- function(
   flag_mask = 1796,
   overwrite = FALSE
 ) {
-  if (!missing(table_name) && !is.null(table_name)) {
-    if (DBI::dbExistsTable(con, table_name) && !overwrite) {
-      stop(
-        "Table '",
-        table_name,
-        "' already exists. Use overwrite = TRUE to replace it."
-      )
-    }
-    if (DBI::dbExistsTable(con, table_name)) {
-      DBI::dbRemoveTable(con, table_name)
-    }
-  }
-
+  .duckhts_check_table_target(con, table_name, overwrite)
   if (
     is.null(region) || length(region) != 1L || is.na(region) || !nzchar(region)
   ) {
@@ -352,22 +358,16 @@ rduckhts_pileup <- function(
   }
   param_str <- build_param_str(params)
 
+  select_sql <- sprintf(
+    "SELECT * FROM read_pileup(%s%s)",
+    sql_quote_string(con, path),
+    param_str
+  )
   if (!is.null(table_name)) {
-    create_query <- sprintf(
-      "CREATE TABLE %s AS SELECT * FROM read_pileup(%s%s)",
-      sql_quote_identifier(con, table_name),
-      sql_quote_string(con, path),
-      param_str
-    )
+    .duckhts_create_table(con, table_name, select_sql, overwrite)
   } else {
-    create_query <- sprintf(
-      "CREATE VIEW pileup_data AS SELECT * FROM read_pileup(%s%s)",
-      sql_quote_string(con, path),
-      param_str
-    )
+    DBI::dbExecute(con, paste("CREATE VIEW pileup_data AS", select_sql))
   }
-
-  DBI::dbExecute(con, create_query)
   invisible(TRUE)
 }
 
@@ -465,19 +465,7 @@ rduckhts_fasta <- function(
   scan_mode = NULL,
   overwrite = FALSE
 ) {
-  if (!missing(table_name) && !is.null(table_name)) {
-    if (DBI::dbExistsTable(con, table_name) && !overwrite) {
-      stop(
-        "Table '",
-        table_name,
-        "' already exists. Use overwrite = TRUE to replace it."
-      )
-    }
-    if (DBI::dbExistsTable(con, table_name)) {
-      DBI::dbRemoveTable(con, table_name)
-    }
-  }
-
+  .duckhts_check_table_target(con, table_name, overwrite)
   params <- list()
   if (!is.null(region)) {
     params$region <- sql_quote_string(con, region)
@@ -499,22 +487,16 @@ rduckhts_fasta <- function(
   }
   param_str <- build_param_str(params)
 
+  select_sql <- sprintf(
+    "SELECT * FROM read_fasta(%s%s)",
+    sql_quote_string(con, path),
+    param_str
+  )
   if (!is.null(table_name)) {
-    create_query <- sprintf(
-      "CREATE TABLE %s AS SELECT * FROM read_fasta(%s%s)",
-      sql_quote_identifier(con, table_name),
-      sql_quote_string(con, path),
-      param_str
-    )
+    .duckhts_create_table(con, table_name, select_sql, overwrite)
   } else {
-    create_query <- sprintf(
-      "CREATE VIEW fasta_data AS SELECT * FROM read_fasta(%s%s)",
-      sql_quote_string(con, path),
-      param_str
-    )
+    DBI::dbExecute(con, paste("CREATE VIEW fasta_data AS", select_sql))
   }
-
-  DBI::dbExecute(con, create_query)
   invisible(TRUE)
 }
 
@@ -546,6 +528,7 @@ rduckhts_bigwig <- function(
   blocks_per_iteration = 64L,
   overwrite = FALSE
 ) {
+  .duckhts_check_table_target(con, table_name, overwrite)
   if (
     !is.character(path) || length(path) != 1L || is.na(path) || !nzchar(path)
   ) {
@@ -576,19 +559,6 @@ rduckhts_bigwig <- function(
     )
   }
 
-  if (!missing(table_name) && !is.null(table_name)) {
-    if (DBI::dbExistsTable(con, table_name) && !overwrite) {
-      stop(
-        "Table '",
-        table_name,
-        "' already exists. Use overwrite = TRUE to replace it."
-      )
-    }
-    if (DBI::dbExistsTable(con, table_name)) {
-      DBI::dbRemoveTable(con, table_name)
-    }
-  }
-
   params <- list(
     blocks_per_iteration = as.character(as.integer(blocks_per_iteration))
   )
@@ -605,21 +575,20 @@ rduckhts_bigwig <- function(
     }
   )
   if (is.null(table_name)) {
-    statement <- paste("CREATE VIEW bigwig_data AS", query)
+    DBI::dbExecute(con, paste("CREATE VIEW bigwig_data AS", query))
   } else {
-    statement <- sprintf(
-      "CREATE TABLE %s AS %s",
-      sql_quote_identifier(con, table_name),
-      query
-    )
+    .duckhts_create_table(con, table_name, query, overwrite)
   }
-  DBI::dbExecute(con, statement)
   invisible(TRUE)
 }
 
 #' Create BED Table
 #'
 #' Creates a DuckDB table from a BED file using the DuckHTS extension.
+#'
+#' @param error_policy Optional short-line policy: \code{"error"} (default),
+#'   \code{"skip"}, or \code{"report"}. Report adds diagnostic columns and
+#'   requires a full-file scan rather than a region query.
 #'
 #' @param con A DuckDB connection with DuckHTS loaded
 #' @param table_name Name for the created table
@@ -642,21 +611,10 @@ rduckhts_bed <- function(
   region = NULL,
   index_path = NULL,
   scan_mode = NULL,
-  overwrite = FALSE
+  overwrite = FALSE,
+  error_policy = NULL
 ) {
-  if (!missing(table_name) && !is.null(table_name)) {
-    if (DBI::dbExistsTable(con, table_name) && !overwrite) {
-      stop(
-        "Table '",
-        table_name,
-        "' already exists. Use overwrite = TRUE to replace it."
-      )
-    }
-    if (DBI::dbExistsTable(con, table_name)) {
-      DBI::dbRemoveTable(con, table_name)
-    }
-  }
-
+  .duckhts_check_table_target(con, table_name, overwrite)
   params <- list()
   if (!is.null(region)) {
     params$region <- sql_quote_string(con, region)
@@ -670,24 +628,25 @@ rduckhts_bed <- function(
       .validate_scan_mode_param(scan_mode)
     )
   }
+  if (!is.null(error_policy)) {
+    if (!is.character(error_policy) || length(error_policy) != 1L ||
+        is.na(error_policy) || !tolower(error_policy) %in% c("error", "skip", "report")) {
+      stop("error_policy must be 'error', 'skip', or 'report'", call. = FALSE)
+    }
+    params$error_policy <- sql_quote_string(con, tolower(error_policy))
+  }
   param_str <- build_param_str(params)
 
+  select_sql <- sprintf(
+    "SELECT * FROM read_bed(%s%s)",
+    sql_quote_string(con, path),
+    param_str
+  )
   if (!is.null(table_name)) {
-    create_query <- sprintf(
-      "CREATE TABLE %s AS SELECT * FROM read_bed(%s%s)",
-      sql_quote_identifier(con, table_name),
-      sql_quote_string(con, path),
-      param_str
-    )
+    .duckhts_create_table(con, table_name, select_sql, overwrite)
   } else {
-    create_query <- sprintf(
-      "CREATE VIEW bed_data AS SELECT * FROM read_bed(%s%s)",
-      sql_quote_string(con, path),
-      param_str
-    )
+    DBI::dbExecute(con, paste("CREATE VIEW bed_data AS", select_sql))
   }
-
-  DBI::dbExecute(con, create_query)
   invisible(TRUE)
 }
 
@@ -924,6 +883,170 @@ rduckhts_bam_bin_counts <- function(
     sql_quote_string(con, path),
     as.character(bin_width),
     param_str
+  )
+  DBI::dbGetQuery(con, query)
+}
+
+#' Count Aligned Bases Against the Reference
+#'
+#' Counts the aligned bases of a SAM, BAM or CRAM file against the reference
+#' by mate, cycle, base quality and substitution. With a mask of the known
+#' variants of the sample or its population, the mismatches that remain are
+#' mostly errors of the read, the library or the alignment. A variant that the
+#' mask does not hold is still counted, so their rate is an upper bound on the
+#' error rate.
+#'
+#' Contig names of the alignment header, the reference and the mask are
+#' compared byte for byte. A contig that the reference or the mask does not
+#' know is an error.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded
+#' @param path Path to the SAM, BAM or CRAM file
+#' @param reference Path to the indexed reference FASTA
+#' @param region Optional comma-separated contigs or intervals. It needs an
+#'   alignment index and selects alignments by overlap
+#' @param mask Optional path to an indexed BCF or a bgzip-compressed VCF with a
+#'   tabix index. Its positions are left out
+#' @param index_path,reference_index_path,mask_index_path Optional explicit
+#'   index paths
+#' @param min_mapq Minimum mapping quality, 0 to 255
+#' @param require_flags,exclude_flags SAM flag masks. The default
+#'   `exclude_flags` leaves out unmapped, secondary, failed, duplicate and
+#'   supplementary alignments
+#' @param indel_flank Read bases to leave out on each side of an insertion, a
+#'   deletion, a reference skip or a soft clip, and reference bases on each
+#'   side of a mask record with an indel or a symbolic allele; 0 to 1000
+#'
+#' @return A data frame with `mate` (1 or 2 for a paired read, 0 otherwise),
+#'   `cycle`, `base_quality` (`NA` when the read stores no qualities),
+#'   `reference_base` and `read_base` on the strand of the read, and `bases`.
+#'   Rows with equal bases are the matches.
+#'
+#' @examples
+#' library(DBI)
+#' library(duckdb)
+#'
+#' con <- rduckhts_connect()
+#' extdata <- function(name) system.file("extdata", name, package = "Rduckhts")
+#' counts <- rduckhts_bam_mismatch_counts(
+#'   con, extdata("bam_mismatch.bam"), extdata("bam_mismatch.fa"),
+#'   mask = extdata("bam_mismatch.mask.bcf")
+#' )
+#' sum(counts$bases[counts$reference_base != counts$read_base]) / sum(counts$bases)
+#' dbDisconnect(con, shutdown = TRUE)
+#'
+#' @export
+rduckhts_bam_mismatch_counts <- function(
+  con,
+  path,
+  reference,
+  region = NULL,
+  mask = NULL,
+  index_path = NULL,
+  reference_index_path = NULL,
+  mask_index_path = NULL,
+  min_mapq = 20,
+  require_flags = 0,
+  exclude_flags = 3844,
+  indel_flank = 5
+) {
+  params <- list(
+    min_mapq = sql_whole_number(min_mapq, "min_mapq", 255),
+    require_flags = sql_whole_number(require_flags, "require_flags", 65535),
+    exclude_flags = sql_whole_number(exclude_flags, "exclude_flags", 65535),
+    indel_flank = sql_whole_number(indel_flank, "indel_flank", 1000)
+  )
+  paths <- list(
+    region = region, mask = mask, index_path = index_path,
+    reference_index_path = reference_index_path, mask_index_path = mask_index_path
+  )
+  for (name in names(paths)) {
+    if (!is.null(paths[[name]])) params[[name]] <- sql_quote_string(con, paths[[name]])
+  }
+  query <- sprintf(
+    "SELECT * FROM duckhts_bam_mismatch_counts(%s, %s%s)",
+    sql_quote_string(con, path),
+    sql_quote_string(con, reference),
+    build_param_str(params)
+  )
+  DBI::dbGetQuery(con, query)
+}
+
+#' Count Agreement Between Overlapping Mates
+#'
+#' Compares read 1 and read 2 of one fragment at each reference position where
+#' both mates have an aligned base, and counts the pairs of base qualities and
+#' bases. A real allele sits on the molecule and both mates show it; a
+#' sequencing error usually shows in one mate only. So the disagreement rate is
+#' about twice the instrument error rate, with no reference, mask or
+#' contamination model. Errors made before sequencing, such as PCR or damage
+#' errors, show in both mates and are not seen.
+#'
+#' Alignments must be in coordinate order. The first mate of a pair is held
+#' until its mate arrives; more than `max_pending` mates held at once is an
+#' error.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded
+#' @param path Path to the paired-end SAM, BAM or CRAM file
+#' @param region Optional comma-separated contigs or intervals. It needs an
+#'   alignment index and selects alignments by overlap; a pair counts only when
+#'   both mates are selected
+#' @param index_path Optional explicit alignment index path
+#' @param reference Optional indexed reference FASTA. Required for CRAM; it is
+#'   otherwise used only to resolve read bases stored as `=`
+#' @param reference_index_path Optional explicit FASTA index path
+#' @param min_mapq Minimum mapping quality, 0 to 255
+#' @param require_flags,exclude_flags SAM flag masks that both mates must pass.
+#'   The default `exclude_flags` leaves out unmapped, secondary, failed,
+#'   duplicate and supplementary alignments
+#' @param max_pending Most mates held at once while they wait for their mate,
+#'   1 to 100000000
+#'
+#' @return A data frame with `read1_quality` and `read2_quality` (`NA` when the
+#'   read stores no qualities), `read1_base` and `read2_base` on the forward
+#'   strand of the reference, and `positions`. Read 1 is the mate with flag
+#'   0x40. Rows with different bases are the disagreements.
+#'
+#' @examples
+#' library(DBI)
+#' library(duckdb)
+#'
+#' con <- rduckhts_connect()
+#' bam <- system.file("extdata", "empty-tids.bam", package = "Rduckhts")
+#' counts <- rduckhts_bam_mate_overlap_counts(con, bam)
+#' sum(counts$positions[counts$read1_base != counts$read2_base]) / sum(counts$positions)
+#' dbDisconnect(con, shutdown = TRUE)
+#'
+#' @export
+rduckhts_bam_mate_overlap_counts <- function(
+  con,
+  path,
+  region = NULL,
+  index_path = NULL,
+  reference = NULL,
+  reference_index_path = NULL,
+  min_mapq = 20,
+  require_flags = 0,
+  exclude_flags = 3844,
+  max_pending = 1000000
+) {
+  params <- list(
+    min_mapq = sql_whole_number(min_mapq, "min_mapq", 255),
+    require_flags = sql_whole_number(require_flags, "require_flags", 65535),
+    exclude_flags = sql_whole_number(exclude_flags, "exclude_flags", 65535),
+    max_pending = sql_whole_number(max_pending, "max_pending", 100000000, low = 1)
+  )
+  paths <- list(
+    region = region, index_path = index_path, reference = reference,
+    reference_index_path = reference_index_path
+  )
+  for (name in names(paths)) {
+    if (!is.null(paths[[name]])) params[[name]] <- sql_quote_string(con, paths[[name]])
+  }
+  query <- sprintf(
+    "SELECT * FROM duckhts_bam_mate_overlap_counts(%s%s)",
+    sql_quote_string(con, path),
+    build_param_str(params)
   )
   DBI::dbGetQuery(con, query)
 }
@@ -1333,19 +1456,7 @@ rduckhts_fastq <- function(
   scan_mode = NULL,
   overwrite = FALSE
 ) {
-  if (!missing(table_name) && !is.null(table_name)) {
-    if (DBI::dbExistsTable(con, table_name) && !overwrite) {
-      stop(
-        "Table '",
-        table_name,
-        "' already exists. Use overwrite = TRUE to replace it."
-      )
-    }
-    if (DBI::dbExistsTable(con, table_name)) {
-      DBI::dbRemoveTable(con, table_name)
-    }
-  }
-
+  .duckhts_check_table_target(con, table_name, overwrite)
   params <- list()
   if (!is.null(mate_path)) {
     params$mate_path <- sql_quote_string(con, mate_path)
@@ -1377,22 +1488,16 @@ rduckhts_fastq <- function(
 
   param_str <- build_param_str(params)
 
+  select_sql <- sprintf(
+    "SELECT * FROM read_fastq(%s%s)",
+    sql_quote_string(con, path),
+    param_str
+  )
   if (!is.null(table_name)) {
-    create_query <- sprintf(
-      "CREATE TABLE %s AS SELECT * FROM read_fastq(%s%s)",
-      sql_quote_identifier(con, table_name),
-      sql_quote_string(con, path),
-      param_str
-    )
+    .duckhts_create_table(con, table_name, select_sql, overwrite)
   } else {
-    create_query <- sprintf(
-      "CREATE VIEW fastq_data AS SELECT * FROM read_fastq(%s%s)",
-      sql_quote_string(con, path),
-      param_str
-    )
+    DBI::dbExecute(con, paste("CREATE VIEW fastq_data AS", select_sql))
   }
-
-  DBI::dbExecute(con, create_query)
   invisible(TRUE)
 }
 
@@ -1437,6 +1542,9 @@ rduckhts_detect_quality_encoding <- function(con, path, max_records = 10000) {
 #'   instead of index-backed count paths. Sequential mode is incompatible with
 #'   \code{region}.
 #' @param attributes_map Logical. If TRUE, returns raw attributes as a scalar MAP column
+#' @param attributes Character vector of attribute keys to expose as VARCHAR
+#'   columns. Key matching is case-sensitive: \code{"id"} does not match
+#'   \code{ID}, and an unmatched key gives a column of \code{NA}
 #' @param attributes_list Logical. If TRUE, returns attributes as MAP(VARCHAR, VARCHAR[])
 #' @param attributes_pairs Logical. If TRUE, returns attributes as a LIST of key/value/index structs
 #' @param strict Logical. If TRUE, enforce GFF3 structural validation while scanning
@@ -1460,21 +1568,10 @@ rduckhts_gff <- function(
   attributes_list = FALSE,
   attributes_pairs = FALSE,
   strict = FALSE,
-  overwrite = FALSE
+  overwrite = FALSE,
+  attributes = NULL
 ) {
-  if (!missing(table_name) && !is.null(table_name)) {
-    if (DBI::dbExistsTable(con, table_name) && !overwrite) {
-      stop(
-        "Table '",
-        table_name,
-        "' already exists. Use overwrite = TRUE to replace it."
-      )
-    }
-    if (DBI::dbExistsTable(con, table_name)) {
-      DBI::dbRemoveTable(con, table_name)
-    }
-  }
-
+  .duckhts_check_table_target(con, table_name, overwrite)
   params <- list()
   if (!is.null(region)) {
     params$region <- sql_quote_string(con, region)
@@ -1522,6 +1619,9 @@ rduckhts_gff <- function(
       .validate_scan_mode_param(scan_mode)
     )
   }
+  if (!is.null(attributes)) {
+    params$attributes <- sql_varchar_list_literal(con, attributes, "attributes")
+  }
   if (attributes_map) {
     params$attributes_map <- "true"
   }
@@ -1537,22 +1637,16 @@ rduckhts_gff <- function(
 
   param_str <- build_param_str(params)
 
+  select_sql <- sprintf(
+    "SELECT * FROM read_gff(%s%s)",
+    sql_quote_string(con, path),
+    param_str
+  )
   if (!is.null(table_name)) {
-    create_query <- sprintf(
-      "CREATE TABLE %s AS SELECT * FROM read_gff(%s%s)",
-      sql_quote_identifier(con, table_name),
-      sql_quote_string(con, path),
-      param_str
-    )
+    .duckhts_create_table(con, table_name, select_sql, overwrite)
   } else {
-    create_query <- sprintf(
-      "CREATE VIEW gff_data AS SELECT * FROM read_gff(%s%s)",
-      sql_quote_string(con, path),
-      param_str
-    )
+    DBI::dbExecute(con, paste("CREATE VIEW gff_data AS", select_sql))
   }
-
-  DBI::dbExecute(con, create_query)
   invisible(TRUE)
 }
 
@@ -1574,6 +1668,9 @@ rduckhts_gff <- function(
 #'   instead of index-backed count paths. Sequential mode is incompatible with
 #'   \code{region}.
 #' @param attributes_map Logical. If TRUE, returns raw attributes as a scalar MAP column
+#' @param attributes Character vector of attribute keys to expose as VARCHAR
+#'   columns. Key matching is case-sensitive: \code{"id"} does not match
+#'   \code{ID}, and an unmatched key gives a column of \code{NA}
 #' @param attributes_list Logical. If TRUE, returns attributes as MAP(VARCHAR, VARCHAR[])
 #' @param attributes_pairs Logical. If TRUE, returns attributes as a LIST of key/value/index structs
 #' @param overwrite Logical. If TRUE, overwrites existing table
@@ -1595,21 +1692,10 @@ rduckhts_gtf <- function(
   attributes_map = FALSE,
   attributes_list = FALSE,
   attributes_pairs = FALSE,
-  overwrite = FALSE
+  overwrite = FALSE,
+  attributes = NULL
 ) {
-  if (!missing(table_name) && !is.null(table_name)) {
-    if (DBI::dbExistsTable(con, table_name) && !overwrite) {
-      stop(
-        "Table '",
-        table_name,
-        "' already exists. Use overwrite = TRUE to replace it."
-      )
-    }
-    if (DBI::dbExistsTable(con, table_name)) {
-      DBI::dbRemoveTable(con, table_name)
-    }
-  }
-
+  .duckhts_check_table_target(con, table_name, overwrite)
   params <- list()
   if (!is.null(region)) {
     params$region <- sql_quote_string(con, region)
@@ -1657,6 +1743,9 @@ rduckhts_gtf <- function(
       .validate_scan_mode_param(scan_mode)
     )
   }
+  if (!is.null(attributes)) {
+    params$attributes <- sql_varchar_list_literal(con, attributes, "attributes")
+  }
   if (attributes_map) {
     params$attributes_map <- "true"
   }
@@ -1669,23 +1758,174 @@ rduckhts_gtf <- function(
 
   param_str <- build_param_str(params)
 
+  select_sql <- sprintf(
+    "SELECT * FROM read_gtf(%s%s)",
+    sql_quote_string(con, path),
+    param_str
+  )
   if (!is.null(table_name)) {
-    create_query <- sprintf(
-      "CREATE TABLE %s AS SELECT * FROM read_gtf(%s%s)",
-      sql_quote_identifier(con, table_name),
-      sql_quote_string(con, path),
-      param_str
-    )
+    .duckhts_create_table(con, table_name, select_sql, overwrite)
   } else {
-    create_query <- sprintf(
-      "CREATE VIEW gtf_data AS SELECT * FROM read_gtf(%s%s)",
-      sql_quote_string(con, path),
-      param_str
+    DBI::dbExecute(con, paste("CREATE VIEW gtf_data AS", select_sql))
+  }
+  invisible(TRUE)
+}
+
+#' Create GenBank Feature Table
+#'
+#' Creates a DuckDB table from a GenBank flat file using the DuckHTS
+#' extension. Features are emitted in \code{read_gff}'s column shape, so a
+#' GenBank record substitutes for a GFF without a schema change. Locations
+#' built with \code{join()} or \code{order()} give one row per segment in
+#' biological order, \code{complement(...)} sets strand \code{"-"}, and the
+#' GFF3 phase of each CDS segment is carried from \code{/codon_start} across
+#' segments. \code{Parent} links a feature to the gene sharing its
+#' \code{/locus_tag} wherever that gene appears in the record, repeated
+#' qualifiers become one key with comma-joined values, and valueless
+#' qualifiers read \code{true}. Records stream one at a time, and a record
+#' without a terminating \code{//} or with a malformed location is an error
+#' naming the feature and line.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded
+#' @param table_name Name for the created table, or \code{NULL} to create the
+#'   \code{genbank_data} view
+#' @param path Path to the GenBank flat file, optionally bgzipped
+#' @param attributes_map Logical. If \code{TRUE}, add a parsed
+#'   \code{MAP(VARCHAR, VARCHAR)} column alongside the raw attribute string
+#' @param attributes Character vector of qualifier keys to expose as VARCHAR
+#'   columns. Each equals \code{attributes_map[key]}, including comma-joined
+#'   repeated qualifiers and \code{NA} for an absent key, and is computed only
+#'   when the query selects it. Key matching is case-sensitive:
+#'   \code{"ec_number"} does not match \code{/EC_number}
+#' @param overwrite Logical. If TRUE, overwrites an existing table
+#'
+#' @return Invisible TRUE on success
+#'
+#' @export
+rduckhts_genbank <- function(
+  con,
+  table_name = NULL,
+  path,
+  attributes_map = FALSE,
+  overwrite = FALSE,
+  attributes = NULL
+) {
+  .duckhts_check_table_target(con, table_name, overwrite)
+  if (
+    !is.character(path) || length(path) != 1L || is.na(path) || !nzchar(path)
+  ) {
+    stop("path must be one non-empty character string", call. = FALSE)
+  }
+  if (
+    !is.logical(attributes_map) ||
+      length(attributes_map) != 1L ||
+      is.na(attributes_map)
+  ) {
+    stop("attributes_map must be TRUE or FALSE", call. = FALSE)
+  }
+
+  params <- list()
+  if (!is.null(attributes)) {
+    params$attributes <- sql_varchar_list_literal(con, attributes, "attributes")
+  }
+  if (attributes_map) {
+    params$attributes_map <- "true"
+  }
+  param_str <- build_param_str(params)
+
+  select_sql <- sprintf(
+    "SELECT * FROM read_genbank(%s%s)",
+    sql_quote_string(con, path),
+    param_str
+  )
+  if (!is.null(table_name)) {
+    .duckhts_create_table(con, table_name, select_sql, overwrite)
+  } else {
+    DBI::dbExecute(con, paste("CREATE VIEW genbank_data AS", select_sql))
+  }
+  invisible(TRUE)
+}
+
+#' Write GenBank Sequence as FASTA
+#'
+#' Writes the ORIGIN sequence of each record in a GenBank flat file to a FASTA
+#' file using the DuckHTS extension. Records are written under the same name
+#' \code{rduckhts_genbank} reports as \code{seqname}, so feature coordinates
+#' land on the contig of that name; the DEFINITION follows the name without its
+#' trailing period, as in NCBI's FASTA export. The FASTA is written to a
+#' temporary file beside \code{output_path} and renamed into place only after
+#' the input has been read to a clean end, so a failure never leaves a partial
+#' output and an existing file is never lost. Records without an ORIGIN block
+#' are skipped; zero written records is an error.
+#'
+#' @param con A DuckDB connection with DuckHTS loaded
+#' @param path Path to the GenBank flat file, optionally bgzipped
+#' @param output_path Optional explicit output path for the FASTA file, one
+#'   non-empty string; defaults to \code{path} with \code{.fa} appended
+#' @param line_width Sequence characters per output line, a whole number
+#'   between 1 and \code{.Machine$integer.max}
+#' @param overwrite Logical. If \code{TRUE}, replace an existing output file;
+#'   otherwise an existing output is an error
+#'
+#' @return A data frame with columns \code{success}, \code{output_path} and
+#'   \code{records_written}
+#'
+#' @export
+rduckhts_genbank_to_fasta <- function(
+  con,
+  path,
+  output_path = NULL,
+  line_width = 70,
+  overwrite = FALSE
+) {
+  if (
+    !is.character(path) || length(path) != 1L || is.na(path) || !nzchar(path)
+  ) {
+    stop("path must be one non-empty character string", call. = FALSE)
+  }
+  if (
+    !is.null(output_path) &&
+      (!is.character(output_path) ||
+        length(output_path) != 1L ||
+        is.na(output_path) ||
+        !nzchar(output_path))
+  ) {
+    stop(
+      "output_path must be NULL or one non-empty character string",
+      call. = FALSE
+    )
+  }
+  if (!is.logical(overwrite) || length(overwrite) != 1L || is.na(overwrite)) {
+    stop("overwrite must be TRUE or FALSE", call. = FALSE)
+  }
+  if (
+    !is.numeric(line_width) ||
+      length(line_width) != 1L ||
+      !is.finite(line_width) ||
+      line_width < 1 ||
+      line_width != floor(line_width) ||
+      line_width > .Machine$integer.max
+  ) {
+    stop(
+      "line_width must be a positive whole number within integer range",
+      call. = FALSE
     )
   }
 
-  DBI::dbExecute(con, create_query)
-  invisible(TRUE)
+  params <- list(line_width = as.character(as.integer(line_width)))
+  if (!is.null(output_path)) {
+    params$output_path <- sql_quote_string(con, output_path)
+  }
+  if (overwrite) {
+    params$overwrite <- "true"
+  }
+  param_str <- build_param_str(params)
+  query <- sprintf(
+    "SELECT * FROM genbank_to_fasta(%s%s)",
+    sql_quote_string(con, path),
+    param_str
+  )
+  DBI::dbGetQuery(con, query)
 }
 
 #' Create Tabix-Indexed File Table
@@ -1723,19 +1963,7 @@ rduckhts_tabix <- function(
   scan_mode = NULL,
   overwrite = FALSE
 ) {
-  if (!missing(table_name) && !is.null(table_name)) {
-    if (DBI::dbExistsTable(con, table_name) && !overwrite) {
-      stop(
-        "Table '",
-        table_name,
-        "' already exists. Use overwrite = TRUE to replace it."
-      )
-    }
-    if (DBI::dbExistsTable(con, table_name)) {
-      DBI::dbRemoveTable(con, table_name)
-    }
-  }
-
+  .duckhts_check_table_target(con, table_name, overwrite)
   params <- list()
   if (!is.null(region)) {
     params$region <- sql_quote_string(con, region)
@@ -1785,22 +2013,16 @@ rduckhts_tabix <- function(
   }
   param_str <- build_param_str(params)
 
+  select_sql <- sprintf(
+    "SELECT * FROM read_tabix(%s%s)",
+    sql_quote_string(con, path),
+    param_str
+  )
   if (!is.null(table_name)) {
-    create_query <- sprintf(
-      "CREATE TABLE %s AS SELECT * FROM read_tabix(%s%s)",
-      sql_quote_identifier(con, table_name),
-      sql_quote_string(con, path),
-      param_str
-    )
+    .duckhts_create_table(con, table_name, select_sql, overwrite)
   } else {
-    create_query <- sprintf(
-      "CREATE VIEW tabix_data AS SELECT * FROM read_tabix(%s%s)",
-      sql_quote_string(con, path),
-      param_str
-    )
+    DBI::dbExecute(con, paste("CREATE VIEW tabix_data AS", select_sql))
   }
-
-  DBI::dbExecute(con, create_query)
   invisible(TRUE)
 }
 
@@ -1932,7 +2154,7 @@ rduckhts_hts_index_raw <- function(
 
 #' Lift Over Variant Coordinates Against a Query
 #'
-#' Applies the DuckHTS `duckdb_liftover(...)` table macro to rows from a SQL query or
+#' Applies the DuckHTS `duckhts_liftover(...)` table macro to rows from a SQL query or
 #' table expression with chromosome and position columns, plus optional reference
 #' and alternate alleles.
 #'
@@ -2043,7 +2265,7 @@ rduckhts_liftover <- function(
     sprintf("no_left_align := %s", tolower(as.character(no_left_align)))
   )
   sql <- sprintf(
-    "SELECT * FROM duckdb_liftover(%s)",
+    "SELECT * FROM duckhts_liftover(%s)",
     paste(params, collapse = ", ")
   )
   DBI::dbGetQuery(con, sql)
@@ -2172,7 +2394,7 @@ rduckhts_bcftools_norm <- function(
 
 #' Munge Summary Statistics Rows
 #'
-#' Applies the DuckHTS `duckdb_munge(...)` table macro to rows from a SQL query or
+#' Applies the DuckHTS `duckhts_munge(...)` table macro to rows from a SQL query or
 #' table expression, using either an upstream-style preset, a named column map,
 #' or a two-column mapping file. When no mapping mode is provided, the bundled
 #' `colheaders.tsv` alias file is used by default.
@@ -2217,7 +2439,7 @@ rduckhts_munge <- function(
   )
   if (provided_modes > 1) {
     stop(
-      "duckdb_munge: specify only one of preset, column_map, or column_map_file",
+      "duckhts_munge: specify only one of preset, column_map, or column_map_file",
       call. = FALSE
     )
   }
@@ -2323,7 +2545,7 @@ rduckhts_munge <- function(
   }
   metal_keys <- c("INFO", "HET_I2", "HET_P", "HET_LP", "DIRE")
   has_metal <- !is.null(column_map) && any(metal_keys %in% names(column_map))
-  macro_name <- if (has_metal) "duckdb_munge_metal" else "duckdb_munge"
+  macro_name <- if (has_metal) "duckhts_munge_metal" else "duckhts_munge"
   sql <- sprintf(
     "SELECT * FROM %s(%s)",
     macro_name,
@@ -2673,20 +2895,7 @@ rduckhts_score <- function(
   .params,
   overwrite
 ) {
-  # Table guard — same pattern as rduckhts_bam, rduckhts_bcf, etc.
-  if (!missing(table_name) && !is.null(table_name)) {
-    if (DBI::dbExistsTable(con, table_name) && !overwrite) {
-      stop(
-        "Table '",
-        table_name,
-        "' already exists. Use overwrite = TRUE to replace it."
-      )
-    }
-    if (DBI::dbExistsTable(con, table_name)) {
-      DBI::dbRemoveTable(con, table_name)
-    }
-  }
-
+  .duckhts_check_table_target(con, table_name, overwrite)
   # Validate .params
   if (!is.null(.params)) {
     if (!is.data.frame(.params)) {
@@ -2743,13 +2952,7 @@ rduckhts_score <- function(
   }
 
   union_sql <- paste(arms, collapse = " UNION ALL BY NAME ")
-  create_sql <- sprintf(
-    "CREATE TABLE %s AS %s",
-    sql_quote_identifier(con, table_name),
-    union_sql
-  )
-  DBI::dbExecute(con, create_sql)
-  invisible(TRUE)
+  .duckhts_create_table(con, table_name, union_sql, overwrite)
 }
 
 # --------------------------------------------------------------------------

@@ -106,6 +106,25 @@ test_somalier_relatedness_wrappers <- function() {
     con, sketches_table = sketches_name, max_sites = 8
   )
   expect_equal(nrow(all_pairs), 6L)
+  # max_pairs caps all pairs: four sketches have six pairs.
+  expect_equal(nrow(rduckhts_somalier_relatedness(
+    con, sketches_table = sketches_name, max_sites = 8, max_pairs = 6
+  )), 6L)
+  expect_error(
+    rduckhts_somalier_relatedness(
+      con, sketches_table = sketches_name, max_sites = 8, max_pairs = 5
+    ),
+    "more pairs than max_pairs"
+  )
+  for (bad_max_pairs in list(0, -1, 1.5, NA_real_, NaN, Inf, c(6, 7), "6")) {
+    expect_error(
+      rduckhts_somalier_relatedness(
+        con, sketches_table = sketches_name, max_sites = 8,
+        max_pairs = bad_max_pairs
+      ),
+      "max_pairs must be one positive"
+    )
+  }
   ab <- all_pairs[all_pairs$sample_a == "A" & all_pairs$sample_b == "B's sample", ]
   expect_equal(
     unname(unlist(ab[c("jointly_called", "ibs0", "ibs2", "shared_hets",
@@ -387,6 +406,24 @@ test_somalier_contamination_wrappers <- function() {
   on.exit(dbDisconnect(con, shutdown = TRUE), add = TRUE)
   qid <- function(x) as.character(dbQuoteIdentifier(con, x))
   qstr <- function(x) as.character(dbQuoteString(con, x))
+
+  # The aggregate and public macro report the same count constraints.
+  expect_error(dbGetQuery(con, paste(
+    "SELECT __duckhts_somalier_charr(",
+    "'Overflow', 'GRCh38', repeat('a', 64), repeat('b', 64),",
+    "0::UBIGINT, 1::UBIGINT, 18446744073709551615::UBIGINT, 1::UBIGINT, 0::UBIGINT,",
+    "200::UBIGINT, 11::UBIGINT, 0.25::DOUBLE, 7::UBIGINT,",
+    "1000000::UBIGINT, 0.1::DOUBLE, 0.001::DOUBLE,",
+    "16000000::UBIGINT, 1::UBIGINT)"
+  )), "measured counts must fit UINTEGER")
+  expect_error(dbGetQuery(con, paste(
+    "SELECT __duckhts_somalier_charr(",
+    "'Partial', 'GRCh38', repeat('a', 64), repeat('b', 64),",
+    "0::UBIGINT, 1::UBIGINT, 199::UBIGINT, NULL::UBIGINT, 0::UBIGINT,",
+    "200::UBIGINT, 11::UBIGINT, 0.25::DOUBLE, 7::UBIGINT,",
+    "1000000::UBIGINT, 0.1::DOUBLE, 0.001::DOUBLE,",
+    "16000000::UBIGINT, 1::UBIGINT)"
+  )), "counts must be all measured or all unavailable")
 
   panel_name <- "contamination panel's relation"
   evidence_name <- 'contamination evidence; relation'

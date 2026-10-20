@@ -20,6 +20,15 @@ extern "C" {
 #define DUCKHTS_SOMALIER_MAX_IDENTITY_BYTES UINT32_C(1024)
 #define DUCKHTS_SOMALIER_THRESHOLD_CACHE_SIZE 64u
 
+/* SQL string-literal lists of the exact Somalier v0.3.4 X and Y contig
+ * aliases (common.nim isAutosomal, somalier.nim extraction). Every other
+ * region is an autosomal site. */
+#define DUCKHTS_SOMALIER_X_REGIONS_SQL \
+    "('X', 'chrX', 'NC_000023.10', 'NC_000023.11')"
+#define DUCKHTS_SOMALIER_SEX_REGIONS_SQL \
+    "('X', 'chrX', 'NC_000023.10', 'NC_000023.11', " \
+    "'Y', 'chrY', 'NC_000024.9', 'NC_000024.10')"
+
 typedef enum duckhts_somalier_status {
     DUCKHTS_SOMALIER_OK = 0,
     DUCKHTS_SOMALIER_NO_EVIDENCE,
@@ -166,6 +175,15 @@ typedef struct duckhts_somalier_pair_stats {
  * Concordance follows v0.3.4's formula but is evaluated and reported in
  * double; this API does not promise its float32 output rounding. */
 duckhts_somalier_status_t duckhts_somalier_pair_stats(
+    const duckhts_somalier_masks_t *a,
+    const duckhts_somalier_masks_t *b,
+    duckhts_somalier_pair_stats_t *result);
+
+/* pair_stats without the content check of each sketch. The caller must have
+ * passed both sketches through validate_masks since they were last written;
+ * this checks only that the two shapes and identities agree. It lets a caller
+ * that compares one sketch with many others validate it once. */
+duckhts_somalier_status_t duckhts_somalier_pair_stats_validated(
     const duckhts_somalier_masks_t *a,
     const duckhts_somalier_masks_t *b,
     duckhts_somalier_pair_stats_t *result);

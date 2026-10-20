@@ -2,6 +2,36 @@
 
 Generated from `functions.yaml`.
 
+## duckhts_macro_definitions
+
+Export the ordered DuckHTS macro definitions for connection-local installation.
+
+Signature:
+
+```sql
+duckhts_macro_definitions()
+```
+
+Returns:
+
+```
+TABLE
+```
+
+### Installation
+
+LOAD creates macros in a writable in-memory default database. For file-backed or read-only default databases LOAD creates no macros: execute the exported TEMP statements in install_order on each connection that needs them (R: rduckhts_install_macros). The decision concerns the database instance's default database; a connection that USEs another catalog before or after LOAD installs the TEMP statements too. TEMP macros shadow, but do not delete, persistent macros in older files. The definitions_sha256 value identifies the entire ordered definition set.
+
+### Columns
+
+install_order UINTEGER, name VARCHAR, public BOOLEAN (listed in functions.yaml), sql VARCHAR (CREATE OR REPLACE TEMP MACRO statement), definitions_sha256 VARCHAR.
+
+### Examples
+
+```sql
+SELECT install_order, name, sql FROM duckhts_macro_definitions() ORDER BY install_order;
+```
+
 ## duckhts_htslib_version
 
 Return the runtime version reported by the htslib library loaded with DuckHTS. Rduckhts uses this value to reject a downstream linking receipt whose source/header version does not match the loaded library.
@@ -283,7 +313,7 @@ Return whether the currently open DuckDB runtime advertises a logical type with 
 Signature:
 
 ```sql
-duckhts_duckdb_type_supported(type_name)
+duckhts_duckdb_type_supported(candidate_type_name)
 ```
 
 Returns:
@@ -346,562 +376,14 @@ BOOLEAN
 SELECT duckhts_duckdb_supports_geometry();
 ```
 
-## duckvep_ensembl_regions
-
-Match tiled FASTA sequence to one Ensembl core assembly and assign dense model-local sequence-region ordinals.
-
-Signature:
-
-```sql
-duckvep_ensembl_regions(core_schema, reference_chunks_table, assembly, species_id := 1)
-```
-
-Returns:
-
-```
-table
-```
-
-### Input
-
-core_schema supplies seq_region and coord_system. reference_chunks_table supplies chrom, zero-based start, half-open end and seq, normally from fasta_nuc(..., include_seq := TRUE). Chunks must be contiguous from zero with matching sequence lengths; every FASTA contig must match exactly one same-length Ensembl region.
-
-### Model paths
-
-Only supplied FASTA paths enter the model. Alternate haplotypes and patches require their named reference chunks. No assembly_exception projection, X/Y PAR merging or circular-region marking is performed. Ordinary mitochondrial coordinates are accepted; origin-crossing intervals are not.
-
-### Examples
-
-```sql
-CREATE TABLE grch38_reference_chunks AS SELECT chrom, start, "end", seq FROM fasta_nuc('GRCh38.primary.fa', bin_width := 1048576, include_seq := TRUE);
-```
-
-```sql
-CREATE TABLE grch38_regions AS SELECT * FROM duckvep_ensembl_regions('ensembl_core', 'grch38_reference_chunks', 'GRCh38');
-```
-
-## duckvep_ensembl_transcripts
-
-Build validated VEP-116 Ensembl core transcript models from core tables and matching tiled FASTA sequence.
-
-Signature:
-
-```sql
-duckvep_ensembl_transcripts(core_schema, reference_chunks_table, assembly, species_id := 1)
-```
-
-Returns:
-
-```
-table
-```
-
-### Selection
-
-Before dense ordinals are assigned, retain current transcripts with nonempty stable IDs and exclude artifact biotypes and readthrough_tra. This builds the Ensembl core selection, not VEP --refseq or --merged sets. GENCODE Basic/Primary membership is retained without filtering to those sets.
-
-### Output
-
-Return resident-loader columns, stable/source IDs, biotypes, versioned MANE Select/Plus Clinical RefSeq accessions when present, ranked nested exons, mature-miRNA cDNA attributes projected into genomic exon segments and supported Translation SeqEdits. MANE accessions remain relational; selection flags enter transcript_flags. Sequence contains phase-adjusted CDS and complete transcript-oriented pre-CDS/post-CDS spliced sequence.
-
-### Translation
-
-Codon tables come from seq_region_attrib, defaulting to table 1 as in VEP 116. All BioPerl/VEP-supported NCBI table IDs are accepted; invalid/conflicting attributes reject import. Single-residue initial_met, _selenocysteine, amino_acid_sub and _stop_codon_rt edits form a reference-peptide overlay. Transcript sequence corrections and unsupported Translation SeqEdit shapes withhold sequence with an explicit reason.
-
-### Model paths
-
-Transcripts retain their selected sequence-path identities, including X/Y PAR and alternate haplotypes. No alt_allele collapse, IS_PAR-based result merging or circular-origin lifting is performed.
-
-### Examples
-
-```sql
-CREATE TABLE grch38_transcripts AS SELECT * FROM duckvep_ensembl_transcripts('ensembl_core', 'grch38_reference_chunks', 'GRCh38');
-```
-
-## duckvep_ensembl_regulation_features
-
-Prepare VEP-116 RegulatoryFeature and MotifFeature intervals for a DuckVEP model.
-
-Signature:
-
-```sql
-duckvep_ensembl_regulation_features(funcgen_schema, regions_table)
-```
-
-Returns:
-
-```
-table
-```
-
-### Input
-
-funcgen_schema supplies regulatory_feature, feature_type and motif_feature; regions_table is prepared by duckvep_ensembl_regions(). EMAR RegulatoryFeature rows are excluded as in VEP before dense ordinals are assigned.
-
-### Output
-
-Validate one-based inclusive coordinates and source feature types, map source regions to model ordinals, and retain stable/source IDs, feature metadata, binding-matrix/regulatory-build IDs and motif scores. feature_kind is 1 for regulatory regions or 2 for transcription-factor binding sites.
-
-### Loading
-
-Pass regulation_feature_index, seq_region, feature_start, feature_end and feature_kind to duckvep_model_load(interval_feature_query := ...). Other metadata remains relational for joins.
-
-### Examples
-
-```sql
-CREATE TABLE grch38_regulation AS SELECT * FROM duckvep_ensembl_regulation_features('ensembl_funcgen', 'grch38_regions');
-```
-
-## duckvep_model_receipt
-
-Create a deterministic provenance receipt and semantic hash for prepared DuckVEP model relations.
-
-Signature:
-
-```sql
-duckvep_model_receipt(regions_table, transcripts_table, source_name, source_version, assembly, source_manifest_sha256, reference_sha256, transcript_filter, regulation_features_table := NULL)
-```
-
-Returns:
-
-```
-table
-```
-
-### Output
-
-Return declared source_name, source_version, assembly, source_manifest_sha256, reference_sha256 and transcript_filter; count transcript, sequence, mature-miRNA and peptide-edit content; hash resident-model fields in stable ordinal order. No clock time is included, so identical inputs yield the same model hash.
-
-### Regulation
-
-When regulation_features_table is supplied, validate dense ordinals, region agreement, interval geometry and feature kinds; count regulatory/motif objects and include their five resident columns in the hash.
-
-### Provenance
-
-source_manifest_sha256 should identify every exact core/funcgen input. Record primary versus alternate/patch reference paths and any assembly_exception preprocessing in the source manifest or transcript_filter.
-
-### Examples
-
-```sql
-CREATE TABLE grch38_receipt AS SELECT * FROM duckvep_model_receipt('grch38_regions', 'grch38_transcripts', 'Ensembl', '116', 'GRCh38', source_manifest_sha256, reference_sha256, 'VEP 116 core selection on FASTA-covered assembly regions', regulation_features_table := 'grch38_regulation');
-```
-
-## duckvep_model_load
-
-Load a validated immutable consequence model under a name in the current DuckDB database; return one TRUE row.
-
-Signature:
-
-```sql
-duckvep_model_load(name, sequence_region_query, transcript_query, exon_query, mature_mirna_query := NULL, peptide_edit_query := NULL, interval_feature_query := NULL, reference_fasta := NULL, transcript_coverage_complete := FALSE)
-```
-
-Returns:
-
-```
-table(loaded BOOLEAN)
-```
-
-### Required queries
-
-Three query strings read committed, non-temporary relations: sorted UINTEGER sequence-region ordinals; dense transcripts with genomic span, strand, gene ordinal, flags and optional CDS span/sequence/codon table; and transcript-ordered exons with genomic/cDNA spans and phase. Exon cDNA spans must be contiguous in transcript order and match genomic exon lengths. Models with transcript insertions/deletions relative to the genome are not accepted. Any source catalog satisfying this contract may be used; several named models may coexist.
-
-### Transcript sequence
-
-Use the 11-column CDS-only form or 13 columns ending in complete transcript-oriented pre_cds_sequence/post_cds_sequence BLOBs. CDS-only models lack transcript flanks; short-tail input is unsupported. Complete flanks enable start/stop predicates for length-changing edits crossing a CDS start or end. See the [model input contract](https://github.com/RGenomicsETL/duckhts/blob/main/design/duckvep.md#versioned-model-input-contract) for exact layouts.
-
-### Optional queries
-
-mature_mirna_query supplies transcript_index UINTEGER, mature_mirna_start/end UBIGINT ordered by transcript/start. peptide_edit_query supplies transcript_index UINTEGER, protein_position UINTEGER, alternate_amino_acid VARCHAR ordered uniquely by transcript/position. interval_feature_query supplies regulation_feature_index UINTEGER, seq_region UINTEGER, feature_start/end UINTEGER and feature_kind UTINYINT ordered by region/start/index; kind 1 is RegulatoryFeature and 2 is MotifFeature. Other identifiers and metadata stay relational. Explicit NULL optional queries/reference equal omission.
-
-### Reference
-
-reference_fasta enables reference-validated VEP-style 3-prime HGVS shifting and requires seq_region UINTEGER, sequence_length UBIGINT and seq_region_name VARCHAR in the region query. An existing FASTA index is required; names and exact lengths are verified without modifying it. The model pins validated FASTA/.fai/optional .gzi sources. Workers own independent mutable handles and reject detectable source replacement or in-place mutation around cache-miss fetches. See [reference ownership](https://github.com/RGenomicsETL/duckhts/blob/main/design/duckvep.md#ownership) for platform-specific source retention.
-
-### Coverage
-
-The default partial model returns unresolved when no transcript is loaded, not intergenic. transcript_coverage_complete := TRUE requires sequence_length UBIGINT and permits supported intergenic results after coordinate checks.
-
-### Model paths
-
-Ordinals address exact supplied paths. Apply declared contig-synonym, PAR, patch, haplotype, assembly_exception or circular-origin mappings before loading or constructing events; the loader performs none.
-
-### Examples
-
-```sql
-SELECT loaded FROM duckvep_model_load('grch38', 'SELECT seq_region, sequence_length, seq_region_name FROM grch38_regions ORDER BY seq_region', 'SELECT transcript_index, seq_region, transcript_start, transcript_end, strand, gene_index, transcript_flags, cds_start, cds_end, cds_sequence, codon_table, pre_cds_sequence, post_cds_sequence FROM grch38_transcripts ORDER BY seq_region, transcript_start, transcript_index', 'SELECT transcript_index, exon.exon_start, exon.exon_end, exon.exon_cdna_start, exon.exon_cdna_end, exon.phase, exon.end_phase FROM grch38_transcripts, LATERAL unnest(exons) AS u(exon) ORDER BY transcript_index, exon.exon_cdna_start', mature_mirna_query := 'SELECT transcript_index, region.mature_mirna_start, region.mature_mirna_end FROM grch38_transcripts, LATERAL unnest(mature_mirna_regions) AS u(region) ORDER BY transcript_index, region.mature_mirna_start', peptide_edit_query := 'SELECT transcript_index, edit.protein_position, edit.alternate_amino_acid FROM grch38_transcripts, LATERAL unnest(peptide_edits) AS u(edit) ORDER BY transcript_index, edit.protein_position', interval_feature_query := 'SELECT regulation_feature_index, seq_region, feature_start, feature_end, feature_kind FROM grch38_regulation ORDER BY seq_region, feature_start, regulation_feature_index', reference_fasta := '/data/Homo_sapiens.GRCh38.dna.primary_assembly.fa', transcript_coverage_complete := TRUE);
-```
-
-## duckvep_model_drop
-
-Remove a named resident DuckVEP consequence model and release its transcript and regulation-feature interval indexes, sequences, and cached worker state. Returns FALSE when the name is absent or the model is in use by an annotation vector.
-
-Signature:
-
-```sql
-duckvep_model_drop(name)
-```
-
-Returns:
-
-```
-BOOLEAN
-```
-
-### Examples
-
-```sql
-SELECT duckvep_model_drop('grch38');
-```
-
-## duckvep_allele_geometry
-
-Separate uploaded, VEP-116 feature and minimized-edit geometry for one literal biallelic allele.
-
-Signature:
-
-```sql
-duckvep_allele_geometry(position, reference, alternate)
-```
-
-Returns:
-
-```
-STRUCT(kind_code UTINYINT, interbase BOOLEAN, anchor_side_code UTINYINT, raw_start0 UBIGINT, raw_end0 UBIGINT, feature_start0 UBIGINT, feature_end0 UBIGINT, edit_start0 UBIGINT, edit_end0 UBIGINT, insertion_boundary0 UBIGINT, reference_difference_offset USMALLINT, reference_difference_length USMALLINT, alternate_difference_offset USMALLINT, alternate_difference_length USMALLINT)
-```
-
-### Input
-
-position is positive and one-based. REF/ALT are nonempty A/C/G/T/N strings of at most 65,535 bases and must differ after ASCII case folding.
-
-### Output
-
-kind_code: 0 SNV, 1 insertion, 2 deletion, 3 length-changing replacement, 4 multi-base substitution. anchor_side_code: 0 none, 1 left, 2 right. Coordinates are non-NULL zero-based half-open intervals; insertion_boundary0 is non-NULL only for interbase insertions. Difference offsets/lengths index uploaded REF/ALT. Pure insertions have equal feature/edit start and end.
-
-### Usage
-
-Use feature_start0/feature_end0 for VEP feature overlap and edit_start0/edit_end0 for affected-reference providers, with an explicit insertion-flank policy when interbase is TRUE. Uploaded REF span is not the affected interval. This does not split multiallelic records or left-align: use duckhts_bcftools_norm(..., split_multiallelic := TRUE) when normalized exact keys are required.
-
-### Examples
-
-```sql
-SELECT (duckvep_allele_geometry(100, 'A', 'ATG')).*;
-```
-
-## duckvep_transcript_projection
-
-Project independent literal alleles and existing DuckVEP annotations into typed, unshifted VEP-116 transcript display fields.
-
-Signature:
-
-```sql
-duckvep_transcript_projection(events_table, annotations_table, transcripts_table)
-```
-
-Returns:
-
-```
-TABLE(event_index UBIGINT, transcript_index UINTEGER, output_allele VARCHAR, interbase BOOLEAN, cdna_start BIGINT, cdna_end BIGINT, cds_start BIGINT, cds_end BIGINT, protein_start BIGINT, protein_end BIGINT, exon_first UINTEGER, exon_last UINTEGER, exon_total UINTEGER, intron_first UINTEGER, intron_last UINTEGER, intron_total UINTEGER, transcript_distance BIGINT, cds_start_nf BOOLEAN, cds_end_nf BOOLEAN, reference_amino_acids VARCHAR, alternate_amino_acids VARCHAR, reference_codons VARCHAR, alternate_codons VARCHAR)
-```
-
-### Input
-
-events_table supplies unique event_index UBIGINT, seq_region UINTEGER, position UBIGINT and reference/alternate VARCHAR. annotations_table supplies event_index, nullable transcript_index and consequence_mask from duckvep_annotate(). transcripts_table is the validated model-loading relation: seq_region, transcript spans/strand/flags, CDS spans/sequence, codon_table, complete post_cds_sequence, transcript-ordered nested exons and peptide_edits from duckvep_ensembl_transcripts().
-
-### Validation
-
-Missing events/transcripts, duplicate event/model keys and source/model region disagreement error. Preserve one row per input annotation, including duplicates and transcript-free rows; output order is not guaranteed.
-
-### Coordinates
-
-output_allele uses VEP feature spelling, with '-' for empty ALT. Nullable one-based cDNA/CDS/protein start/end fields retain independently missing endpoints; insertion ranges use ascending flanks with explicit interbase. Exon/intron ordinals follow transcript orientation; totals describe the model even without overlap. Distance is the shortest feature-endpoint to transcript-endpoint distance, present only for upstream/downstream consequences.
-
-### Sequence
-
-Codon strings preserve VEP changed-base casing and variable-length indel forms. Amino-acid fields separately contain reference/alternate strings, including multiple residues. Withheld sequence yields NULL codon/amino-acid fields; '-' means an empty codon. Translation uses the prepared codon table and reference peptide edits.
-
-### Scope
-
-This adds display fields, not consequences, phased/structural projection or HGVS shifting. Join source/model metadata by event_index/transcript_index. CDS quality flags cds_start_nf/cds_end_nf are not canonical flags.
-
-### Examples
-
-```sql
-SELECT p.* FROM duckvep_transcript_projection('events', 'annotations', 'grch38_transcripts') p;
-```
-
-## duckvep_repeat_alleles
-
-Prepare bounded literal reference and alternate alleles from exact ordered repeat descriptions.
-
-Signature:
-
-```sql
-duckvep_repeat_alleles(reference_components, alternate_components, sequence_exact, max_allele_bases := 5000)
-```
-
-Returns:
-
-```
-STRUCT(reference VARCHAR, alternate VARCHAR, reference_length UBIGINT, alternate_length UBIGINT, length_change BIGINT, length_direction VARCHAR, status VARCHAR)
-```
-
-### Input
-
-Each component list contains unit VARCHAR and numeric count fields in sequence order. Required sequence_exact asserts that both complete descriptions, including interruptions, represent the event's literal alleles. CNV:TR summary metadata alone does not establish exactness.
-
-### Output
-
-Exact complete inputs return both literal sequences, their base lengths, signed alternate-minus-reference length_change and length_direction GAIN, LOSS or NEUTRAL. The direction describes expanded base length; it is not a copy-number inference. Empty lists and zero counts produce empty, not NULL, alleles.
-
-### Status
-
-FALSE exactness returns summary_only with all fact fields NULL. With TRUE, missing lists/elements/units/counts return incomplete_input; fractional counts return nonintegral_count without rounding. One unavailable allele withholds the complete event fact.
-
-### Limits
-
-Nonempty IUPAC DNA units preserve case and ambiguity. Invalid units and negative or nonfinite counts error even in summary mode. max_allele_bases is a nonnegative integer no greater than 2147483647 and applies separately to each complete allele; exhaustion errors before either sequence is returned.
-
-### Scope
-
-No RN/RUS/RUC/RB parsing, reference-count inference, FASTA validation, genomic anchoring, normalization or VEP expansion-policy certification is performed. Retain event and ALT ordinals, raw counts, confidence and exactness beside the fact. Use ok literal outputs with annotation or haplotype paths; keep summaries for structural consumers. ok certifies expansion, not the caller's exactness or resolution of ambiguous bases.
-
-### Examples
-
-```sql
-SELECT (duckvep_repeat_alleles([{unit: 'CAG', count: 10}], [{unit: 'CAG', count: 5}, {unit: 'CAT', count: 1}, {unit: 'CAG', count: 5}], true, max_allele_bases := 100)).*;
-```
-
-## duckvep_breakend_geometry
-
-Parse one raw VCF 4.5 breakend ALT into mate coordinates, orientation and retained replacement sequence.
-
-Signature:
-
-```sql
-duckvep_breakend_geometry(alternate)
-```
-
-Returns:
-
-```
-STRUCT(mate_chrom VARCHAR, mate_position UBIGINT, local_join_after BOOLEAN, mate_extends_right BOOLEAN, replacement_sequence VARCHAR)
-```
-
-### Input
-
-Call once per ALT after multiallelic expansion. Paired forms t[p[, t]p], ]p]t and [p[t retain exact mate names, one-based positions and case-preserved replacement t. Split mate names at the last colon; no aliases or reference lookup are applied.
-
-### Orientation
-
-local_join_after is TRUE when brackets follow t; mate_extends_right is TRUE for opening brackets. The mate piece is reverse-complemented when these flags differ. Replacement t includes retained local bases, not necessarily inserted-only sequence. Single forms t. and .t retain replacement/local orientation with NULL mate fields.
-
-### Validation
-
-NULL/non-breakend ALT, including '.', '*' and symbolic alleles, returns NULL. Malformed bracket or leading/trailing-dot forms error. Decimal mate positions from zero through UBIGINT maximum are checked; zero can denote a virtual telomeric mate.
-
-### Scope
-
-Parsing does not make single, telomeric or unknown-contig breakends annotatable: duckvep_annotate requires paired positive model-addressable UINTEGER coordinates after an explicit mate-name join. Retain source ID, MATEID, EVENT, confidence, REF, raw ALT and orientation/payload beside annotations. ALT alone cannot establish reciprocal identity, phase or fusion HGVS. No reciprocal-record merging or rearranged-sequence reconstruction is performed.
-
-### Examples
-
-```sql
-SELECT (duckvep_breakend_geometry('C[2:321682[')).*;
-```
-
-## duckvep_haplotypes
-
-Replay literal phased CDS/protein paths with carriers, source contributors, coding blocks, aligned differences and optional protein HGVS.
-
-Signature:
-
-```sql
-duckvep_haplotypes(calls_query, model_name, phase_policy := 'strict', input_mode := 'alt_events', hgvs := FALSE, max_active_events := 16384, max_active_transcripts := 4096, max_active_carriers := 65536, max_active_prefixes := 262144, max_active_projections := 262144, max_allele_bytes := 8388608, max_leaf_events := 4096, max_leaf_edits := 65536, max_sequence_bases := 1048576, max_ploidy := 64, max_phase_sets := 1024, max_alignment_cells := 16777216, max_leaf_differences := 65536, max_hgvs_operations := 65536, max_hgvs_bytes := 1048576, max_hgvs_reference_bytes := 262144, workspace_limit := 268435456)
-```
-
-Returns:
-
-```
-TABLE(transcript_index UINTEGER, cds VARCHAR, protein VARCHAR, sequence_flags UINTEGER, evidence_flags UTINYINT, projection_status VARCHAR, sequence_status VARCHAR, edit_count UBIGINT, carrier_count UINTEGER, carriers STRUCT(sample_index UINTEGER, phase_set BIGINT, haplotype_lane USMALLINT, ploidy USMALLINT)[], contributors STRUCT(event_index UBIGINT, seq_region UINTEGER, position UBIGINT, reference VARCHAR, alternate VARCHAR, evidence_flags UTINYINT, projection_status VARCHAR)[], coding_blocks STRUCT(cds_start UINTEGER, reference VARCHAR, alternate VARCHAR, alt_start0 UBIGINT, length_change BIGINT, sequence_flags UINTEGER, coding_status VARCHAR, local_consequence_mask UBIGINT, after_first_stop BOOLEAN, event_indices UBIGINT[])[], cds_differences STRUCT(ref_start0 UBIGINT, alt_start0 UBIGINT, reference VARCHAR, alternate VARCHAR, alignment_start0 UBIGINT)[], protein_differences STRUCT(ref_start0 UBIGINT, alt_start0 UBIGINT, reference VARCHAR, alternate VARCHAR, alignment_start0 UBIGINT)[], stop_in_displaced_frame BOOLEAN, hgvsp VARCHAR, hgvsp_status VARCHAR, nominal_length_diff BIGINT)
-```
-
-### Input
-
-calls_query supplies explicit event/transcript/sample candidates for model_name. alt_events uses decoded GT/PS; source_records requires vep116_compat, original gt and complete ordered alternates. Retain reference-only context and equal-position file order in event_index: source-buffer order is planned before genotype filtering. DuckDB sorts input; result/carrier-list order is not guaranteed. See the [phased input contract](https://github.com/RGenomicsETL/duckhts/blob/main/design/duckvep.md#phased-edits) for schemas and coordinates.
-
-### Raw replay
-
-Duplicate identity includes the complete ordered ALT list; shadowed_duplicate contributors execute no replacement. Overlapping records replay ordered full spans, retain overwritten provenance and produce net blocks; local SO/displaced-frame facts are NULL with unsupported_ordered_replacements. Missing-slot replay and validated coding/noncoding-span omissions are conditional. Raw N/U/lowercase ALTs within ACGTUN/acgtun retain source_allele_skipped, conditional evidence and zero edits; unsupported symbols/dashes remain invalid. Other valid sources still replay. Omitted sources retain source_unmapped; model/REF failures withhold sequence. Raw contributors add alt_index: 0 REF, positive ALT, NULL undefined.
-
-### Output
-
-Decoded missing/unphased paths withhold sequence. nominal_length_diff sums projected ALT-minus-REF lengths before current-CDS-end clipping; it is NULL without CDS and may differ from rebuilt length change. Blocks expose local coding status, masks decoded by duckvep_so_terms() and first-stop position facts, not whole-haplotype consequences or protein rescue. Intronic context preserves provenance without changing CDS. Samples without retained exonic genotypes use curated reference peptide; retained exonic calls use mutation translation even with zero edits.
-
-### HGVS
-
-hgvs := TRUE requests a VEP-116-derived predicted protein suffix with VEP local-peptide/unknown-residue presentation. hgvsp_status='ok' means supported computation, not independent HGVS-rule certification; other statuses retain NULL text and sequence/provenance. Phase policy controls assignment, not nomenclature. Conditional/overlapping paths, missing peptide data, unsupported contexts and unrepresentable ends remain explicit. One-original-ALT paths use independent-event VEP HGVS, including shifting and absent results; MNV islands retain that identity. Required unavailable FASTA returns missing_reference. Prepared references keep their own residues/length; reference-only stop-marker loss supplies no extension and insertions need reference flanks. Normalization does not rewrite coding blocks or source IDs.
-
-### Limits
-
-max_hgvs_operations bounds working/final operations; max_hgvs_bytes excludes NUL; max_hgvs_reference_bytes includes NUL and FASTA line-ending scratch. Sequence/edit/allele storage derives from max_sequence_bases, max_leaf_edits and max_allele_bytes. Named capacities error without growth, approximation or dropped rows. workspace_limit includes DuckVEP buffers, not DuckDB input/sort/output or HTSlib handle/transport storage. Disabled HGVS allocates no HGVS workspace/reference handle and returns not_requested.
-
-### Scope
-
-Join identifiers through model ordinals. Whole-haplotype SO/IMPACT/NMD, DNA HGVS, complete protein HGVS, structural composition and splice prediction are unfinished. Preparation reads committed objects on the retained connection, not caller TEMP objects or uncommitted writes; nested/concurrent preparation errors as busy.
-
-### Examples
-
-```sql
-SELECT * FROM duckvep_haplotypes('SELECT * FROM prepared_transcript_calls', 'grch38');
-```
-
-```sql
-SELECT transcript_index, cds, protein, unnest(carriers) AS carrier FROM duckvep_haplotypes('SELECT * FROM prepared_transcript_calls', 'grch38', max_ploidy := 8);
-```
-
-```sql
-SELECT * FROM duckvep_haplotypes('SELECT * FROM prepared_source_calls', 'grch38', input_mode := 'source_records', phase_policy := 'vep116_compat');
-```
-
-## duckvep_phase_call
-
-Assign decoded GT/PS allele slots to haplotype lanes under strict or pinned VEP-116 phase policy.
-
-Signature:
-
-```sql
-duckvep_phase_call(alleles, phase_before, phase_set := NULL, phase_policy := 'strict')
-```
-
-Returns:
-
-```
-STRUCT(input_slot USMALLINT, allele_index INTEGER, haplotype_lane USMALLINT, ploidy USMALLINT, phase_set BIGINT, phase_scope VARCHAR, status VARCHAR)[]
-```
-
-### Input
-
-Consume read_geno alleles/phase_before before ALT expansion and retain source record/sample/model identity. Ploidy is 1..65535. NULL GT returns NULL; empty GT or negative called indices error. NULL phase lists/flags mean unavailable phase; otherwise list lengths must match. NULL policy means strict; unknown policy errors.
-
-### Output
-
-One entry preserves each one-based input_slot, source allele_index (0 REF, positive ALT, NULL missing) and ploidy. Scope is local to sample/chromosome. phase_set retains signed BIGINT identity; NULL default differs from zero. Unresolved heterozygous slots have NULL haplotype_lane, unresolved scope and unphased status. Missing alleles stay missing even when their lane is known.
-
-### Strict
-
-VCF 4.4 indicators qualify the following allele: 0|1/2 and /0|1/2 leave slots 1/3 unphased; a later pipe does not phase its preceding allele. Explicitly phased lanes are retained; other slots resolve only when permutation cannot change assignment. Homozygous called/haploid GTs have all_phase_sets scope and apply across sets, not a separate NULL-PS bucket.
-
-### VEP compatibility
-
-vep116_compat ignores separators/PS and assigns allele_slot lanes after removing missing entries; missing entries remain explicit with NULL lane. Decoded ploidy is preserved. This does not emulate raw mixed/prefixed-separator parsing or VEP container ploidy inference.
-
-### Scope
-
-Do not discard missing/unresolved entries. This consumes declared GT/PS, not PSL/PSO/PID or inferred phase; it does not validate VCF PS schema or source ALT bounds, build haplotypes or emit SO/HGVS. Other phase encodings need an explicit adapter.
-
-### Examples
-
-```sql
-SELECT unnest(duckvep_phase_call([0, 1], [true, true], phase_set := 10)) AS allele;
-```
-
-```sql
-SELECT record_index, c.sample_index, unnest(duckvep_phase_call(c.alleles, c.phase_before, phase_set := c.phase_set)) AS allele FROM (SELECT record_index, unnest(calls) AS c FROM read_geno('geno_calls.bcf')) ORDER BY record_index, sample_index, allele.input_slot;
-```
-
-## duckvep_annotate
-
-Annotate independent literal alleles, exact typed structural events and paired breakends against a resident VEP-116-compatible model.
-
-Signature:
-
-```sql
-duckvep_annotate(events_table, model_name, hgvs := FALSE, upstream_distance := 5000, downstream_distance := 5000, rich := FALSE)
-```
-
-Returns:
-
-```
-table
-```
-
-### Input
-
-events_table supplies event_index UBIGINT, seq_region UINTEGER, positive one-based position UBIGINT, reference/alternate VARCHAR, end_position UBIGINT, structural_type/copy_change VARCHAR and mate_seq_region UINTEGER/mate_position UBIGINT. One row represents one ALT. Keep genotype, phase, confidence, raw ALT, orientation and other provenance in the source relation; join by event_index.
-
-### Geometry
-
-Literal alleles are small variants; explicit structural type, supported symbolic ALT or spans without literal alleles select structural events; a complete mate pair selects BND. Incomplete/contradictory geometry errors, including symbolic/type disagreement. For VCF span SVs use POS+1 through END; insertion position is the interbase site after POS. NULL copy_change implies LOSS for DEL and GAIN for DUP/TDUP.
-
-### Ordering
-
-Supply globally nondecreasing model-region/coordinate order; the macro does not sort. Region ordinals address exact model paths, without contig aliases or PAR/patch/alternate-haplotype/circular-origin projection. Events are independent; GT/PS does not combine them. Zero disables either directional transcript window.
-
-### Output
-
-Compact fields include SO/region masks, IMPACT/status/reason codes, one-based cDNA/CDS/protein coordinates, amino-acid bytes, NMD prediction/escape codes and overlap-object ordinals. protein_position identifies the affected residue/codon. rich := TRUE adds readable consequence/impact/region/amino-acid/NMD/object/audit labels while retaining compact fields; FALSE/NULL leaves labels NULL. Audit status distinguishes unresolved computation from absent consequence and is not an Ensembl CSQ field.
-
-### HGVS
-
-hgvs := TRUE adds independent-event HGVSc/HGVSn/HGVSp for small variants and composes with rich := TRUE. transcript_hgvs and protein_hgvs are accession-free c./n./p. bodies; join versioned transcript/protein identifiers from retained model metadata when a complete serialized VEP-style field is required. Structural/BND HGVS remains NULL.
-
-### gVCF alleles
-
-Expanded `<NON_REF>`, bare `*` and `.` emit no annotation. The distinct `<*>` overlap allele receives coding_sequence_variant or corresponding start/stop-retained terms and no HGVS. Its literal three-character length can cause ablation when long REF contains a feature; filter `<*>` after ALT expansion if unwanted. Record-level END does not turn a literal mixed-gVCF ALT into an SV.
-
-### Metadata
-
-Decode masks with duckvep_so_terms(); join transcript/gene/regulation ordinals to model metadata. This is not the full serialized VEP CSQ vocabulary: exon/intron display, codon strings, distance, CANONICAL/APPRIS/TSL, existing variation and supplementary predictors require their model/annotation relations. See [independent-event execution](https://github.com/RGenomicsETL/duckhts/blob/main/design/duckvep.md#independent-variant-execution) and [structural compatibility](https://github.com/RGenomicsETL/duckhts/blob/main/ERRATA.md#model-inputs-and-structural-events).
-
-### Examples
-
-```sql
-SELECT * FROM duckvep_annotate('canonical_events', 'grch38');
-```
-
-```sql
-SELECT event_index, transcript_index, transcript_hgvs, protein_hgvs FROM duckvep_annotate('canonical_events', 'grch38', hgvs := TRUE, upstream_distance := 5000, downstream_distance := 0);
-```
-
-```sql
-SELECT event_index, transcript_index, consequence, impact, protein_position, nmd_prediction FROM duckvep_annotate('canonical_events', 'grch38', rich := TRUE);
-```
-
-## duckvep_so_terms
-
-Return VEP-116 Sequence Ontology terms, consequence-mask bits, impact, severity rank and evaluator tier.
-
-Signature:
-
-```sql
-duckvep_so_terms()
-```
-
-Returns:
-
-```
-table
-```
-
-### Usage
-
-Each row includes bit index and single-bit mask. Filter/aggregate compact annotations before expanding selected terms with (annotation.consequence_mask & term.consequence_mask) <> 0. Metadata comes from the same pinned class model as the native engine.
-
-### Examples
-
-```sql
-SELECT a.event_index, t.consequence FROM duckvep_annotate('canonical_events', 'grch38') a JOIN duckvep_so_terms() t ON (a.consequence_mask & t.consequence_mask) <> 0;
-```
-
 ## read_bcf
 
-Read VCF/BCF with header-typed INFO/FORMAT, typed CSQ/ANN/BCSQ annotations, sample selection and optional tidy sample rows.
+Read VCF/BCF with header-typed INFO/FORMAT, typed CSQ/ANN/BCSQ annotations, sample selection, optional tidy sample rows and optional record file positions.
 
 Signature:
 
 ```sql
-read_bcf(path, region := NULL, index_path := NULL, tidy_format := FALSE, additional_csq_column_types := NULL, scan_mode := 'auto', decompression_threads := 0, decode_error_policy := 'null', samples := NULL)
+read_bcf(path, region := NULL, index_path := NULL, tidy_format := FALSE, additional_csq_column_types := NULL, scan_mode := 'auto', decompression_threads := 0, decode_error_policy := 'null', samples := NULL, regions := NULL, include_file_offset := FALSE)
 ```
 
 Returns:
@@ -930,9 +412,17 @@ HTSlib selectors: NULL/'-' keeps all, empty string keeps none, comma-separated n
 
 Comma-separated indexed regions use a union iterator, emitting each physical record once across overlaps. NULL/empty region means no filter; empty list items and malformed known-contig intervals error. Unknown contigs follow HTSlib's skip policy.
 
+### Typed regions
+
+Typed regions: regions := STRUCT(chrom VARCHAR, start BIGINT, "end" BIGINT)[] selects 0-based half-open intervals (VCF POS p is [p-1, p)) with one native multi-region iterator built directly from header/index contig ids, not region strings. NULL or omitted regions keeps the ordinary behaviour; a non-NULL empty list selects zero records, including COUNT(*), and never falls back to a scan (list() over no rows is NULL, so wrap it as coalesce(list(...), []::STRUCT(chrom VARCHAR, start BIGINT, "end" BIGINT)[])). region and non-NULL regions are mutually exclusive; regions requires a usable index (.tbi/.csi) and is incompatible with scan_mode := 'sequential'. chrom is a literal contig name, so names such as 'HLA-A*01:01' or 'chr1:2' need no braces; a contig absent from the header/index yields no records for that interval, like an unknown contig in region. NULL fields, start < 0 and end <= start error. Intervals are sorted and overlapping or adjacent ones merged per contig without broadening; a physical record is returned once however many intervals overlap it, and physical duplicates stay separate. Records that merely overlap an interval (a deletion spanning it) are returned: filter POS in SQL for exact positions. Caps: 1,000,000 intervals and 128 MiB of native payload, checked before storage; they do not bound the caller's own list aggregation. Prepare the plan on the caller connection with SET VARIABLE p = (SELECT coalesce(list({'chrom': chrom, 'start': pos - 1, 'end': pos}), []::STRUCT(chrom VARCHAR, start BIGINT, "end" BIGINT)[]) FROM (SELECT DISTINCT chrom, pos FROM requests)) and pass regions := getvariable('p'). An unknown variable name is NULL to DuckDB (a full scan), so rduckhts_bcf(regions_var =) and rduckhts_geno(regions_var =) check that the variable exists.
+
 ### Scanning
 
 scan_mode='sequential' streams without loading an index. auto streams if no usable index was available at bind; region queries require one. Index-only counts do not validate data contents. Automatic/region plans retain the parsed bind-time index, including remote/explicit index_path: subsequent index removal, replacement or corruption does not change the plan. Supply an initially matching pair and keep data/header contents unchanged; this is not a snapshot or validation of an unrelated index. Reprepare to use a new index.
+
+### Offsets
+
+include_file_offset := TRUE adds FILE_OFFSET UBIGINT after FILTER: the BGZF virtual position immediately after each record, not its start, as in read_bam. Sequential, indexed, parallel, region and typed-region scans of one unchanged file give a record the same value, and it increases strictly in file order, so ORDER BY FILE_OFFSET restores file order, also among records at one position. Tidy rows of a record share it. BGZF input includes BCF written by bcftools -Ou, which is level-0 BGZF. Uncompressed VCF, plain gzip VCF and a BCF stream without BGZF blocks return NULL. Values are not comparable across files.
 
 ### Threads
 
@@ -944,6 +434,10 @@ decompression_threads controls per-file HTSlib workers, default 0; it is separat
 SELECT CHROM, POS, REF, ALT FROM read_bcf('vcf_file.bcf') LIMIT 5;
 ```
 
+```sql
+SELECT CHROM, POS, ID, FILE_OFFSET FROM read_bcf('cohort.vcf.gz', include_file_offset := true) ORDER BY FILE_OFFSET;
+```
+
 ## read_geno
 
 Read one row per VCF/BCF record with typed arbitrary-ploidy GT/PS calls, selected FORMAT fields and optional original VCF genotype text.
@@ -951,7 +445,7 @@ Read one row per VCF/BCF record with typed arbitrary-ploidy GT/PS calls, selecte
 Signature:
 
 ```sql
-read_geno(path, region := NULL, index_path := NULL, samples := NULL, non_reference_only := FALSE, scan_mode := 'auto', decompression_threads := 0, decode_error_policy := 'null', format_fields := NULL, raw_gt := FALSE, include_filter := FALSE)
+read_geno(path, region := NULL, index_path := NULL, samples := NULL, non_reference_only := FALSE, scan_mode := 'auto', decompression_threads := 0, decode_error_policy := 'null', format_fields := NULL, raw_gt := FALSE, include_filter := FALSE, regions := NULL)
 ```
 
 Returns:
@@ -970,7 +464,7 @@ samples uses read_bcf's selectors. non_reference_only removes calls without a ca
 
 ### Ordering
 
-Full scans stream in physical input order regardless of index availability, with one scan worker and separate HTSlib decompression threads. record_index is zero-based and scan-local, not a persistent file locator. Indexed region unions restart at zero in HTSlib iterator order; overlapping regions visit a physical record once while preserving distinct duplicates. Use ORDER BY record_index when order matters. Sequential mode rejects regions.
+Full scans stream in physical input order regardless of index availability, with one scan worker and separate HTSlib decompression threads. record_index is zero-based and scan-local, not a persistent file locator. Indexed region unions restart at zero in HTSlib iterator order; overlapping regions visit a physical record once while preserving distinct duplicates. Use ORDER BY record_index when order matters. Sequential mode rejects regions and typed regions.
 
 ### FORMAT
 
@@ -988,10 +482,22 @@ Header/type/cardinality mismatches follow decode_error_policy. Scalar cardinalit
 
 raw_gt := TRUE appends calls.raw_gt VARCHAR after any format struct, preserving exact original VCF separators, leading phase markers and allele spelling. Absent GT is NULL; literal '.' stays text. FALSE preserves the default schema. BCF rejects TRUE even when calls is unprojected. Text follows original-header sample selection and scan ordinals, including region unions; it does not emulate a downstream parser.
 
+### Typed regions
+
+regions := STRUCT(chrom VARCHAR, start BIGINT, "end" BIGINT)[] has the same contract as read_bcf: 0-based half-open, NULL vs empty, literal contig names, index required, 1,000,000 interval and 128 MiB caps; see read_bcf. Ordinals restart at zero in HTSlib iterator order.
+
+### Exact alleles
+
+Exact alleles: regions plus SQL restore requested (chrom, pos, REF, ALT) alleles without changing the reader. Keep requests unchanged, plan I/O with SELECT DISTINCT chrom, pos, read with non_reference_only := false and format_fields such as ['GP','DS','HS'] so hom-ref and missing calls are returned, expand ALT with its ordinal, and join on equality: WITH alleles AS (SELECT record_index, CHROM, POS, REF, ALT AS full_alt, calls, unnest(ALT) AS match_alt, generate_subscripts(ALT, 1) AS alt_index FROM read_geno('f.bcf', regions := getvariable('p'), non_reference_only := false)) SELECT s.*, a.record_index, a.full_alt, a.alt_index, a.calls FROM requests s LEFT JOIN alleles a ON s.chrom = a.CHROM AND s.pos = a.POS AND s.ref = a.REF AND s.alt = a.match_alt. Use equality on the expanded ALT: list_contains(a.ALT, s.alt) in the join condition plans a nested-loop join. Multi-ALT records keep every ALT in file order with the matched 1-based alt_index, and a request matching two ALT slots or two physical records returns a row each. GP, DS, HS and phase are full-site values: no allele splitting, GP remapping, dosage selection, trimming, strand flip or liftover, so a shifted indel representation is not matched. An ALT-less record disappears under unnest, so diagnosing unmatched requests needs a second step; rduckhts_geno_sites() composes the complete recipe on the caller connection, labelling each request matched, allele_not_at_site, ref_mismatch or absent (position-level diagnostics only, never a fabricated genotype). record_index is scan-local; order with ORDER BY request_id, record_index, alt_index. The reader does not deduplicate requests.
+
 ### Examples
 
 ```sql
 SELECT record_index, CHROM, POS, unnest(calls) AS call FROM read_geno('geno_calls.bcf', non_reference_only := TRUE) ORDER BY record_index;
+```
+
+```sql
+SET VARIABLE p = [{'chrom': 'chr1', 'start': 99, 'end': 100}, {'chrom': 'HLA-A*01:01', 'start': 9, 'end': 10}]; SELECT record_index, CHROM, POS, REF, ALT FROM read_geno('geno_sites.bcf', regions := getvariable('p'), non_reference_only := FALSE, format_fields := ['GP', 'DS', 'HS']);
 ```
 
 ## read_bcf_samples
@@ -1032,6 +538,10 @@ Returns:
 table
 ```
 
+### Map keys
+
+AUXILIARY_TAGS leaves out a tag whose key is not valid UTF-8, since a MAP key cannot be NULL; a value that is not valid UTF-8 is NULL.
+
 ### Representation
 
 sequence_encoding='nt16' returns SEQ UTINYINT[]; quality_representation='phred' returns QUAL UTINYINT[]; cigar_representation='binary' returns packed BAM CIGAR UINTEGER[] instead of SAM text.
@@ -1042,11 +552,19 @@ FILE_OFFSET is the BGZF virtual position immediately after each compressed BAM r
 
 ### Scanning
 
-scan_mode='sequential' streams rather than using indexed count/parallel paths and rejects region. NULL/empty region means no filter; empty comma-separated items and malformed known-contig intervals error. Unknown contigs follow HTSlib's skip policy.
+scan_mode='sequential' streams rather than using indexed count/parallel paths and rejects region. NULL/empty region means no filter; empty comma-separated items and malformed known-contig intervals error. Unknown contigs follow HTSlib's skip policy. An indexed full-file scan is split by reference across DuckDB threads and reports the index's row total to the planner as an estimate. Both need the optional per-reference statistics of a BAI or CSI: when a reference has alignments and no statistics, the scan is one sequential stream and no estimate is reported. A CRAM scan is split by reference and reports no estimate. In a region list, '.' is the whole file and '*' is the reads without coordinates. htslib locates both from the same optional statistics; for a BAM whose index lacks them, read_bam reads those two items sequentially, so the result does not depend on the index statistics.
 
 ### Threads
 
 decompression_threads controls per-file HTSlib workers, default 2; use 0 to disable. It does not set DuckDB processing parallelism.
+
+### CRAM fields
+
+A CRAM scan asks htslib only for the fields its projected columns need, and every projected column keeps its value. SEQ and QUAL are decoded only when SEQ, QUAL, CIGAR, MD, NM or AUXILIARY_TAGS is projected, because htslib makes MD and NM from the reference when the file does not store them. Tag data is decoded only when CIGAR, a tag column, AUXILIARY_TAGS, READ_GROUP_ID or SAMPLE_ID is projected; CIGAR needs both because a long CIGAR may be stored as a placeholder with its real value in a CG tag, which htslib restores only from tag data and SEQ. Without SEQ and QUAL, htslib does not load the reference for a slice that covers one reference.
+
+### Limits
+
+With decompression_threads > 0, a CRAM scan that projects tag data keeps htslib's spare record buffers, which only grow: memory rises with the alignments read, toward (2 x decompression_threads + 1) slices x about 10,000 records x the largest record. A CRAM scan that decodes SEQ and QUAL with decompression_threads > 0 loads the whole reference sequence of each contig it reads. decompression_threads := 0 avoids both.
 
 ### Examples
 
@@ -1228,12 +746,12 @@ SELECT NAME, length(SEQUENCE) FROM read_fasta('ce.fa');
 
 ## read_bed
 
-Read BED3-BED12 interval files with canonical typed columns and optional tabix-backed region filtering. scan_mode := 'sequential' forces full-file streaming/counting instead of index-backed count paths and is incompatible with region.
+Read BED3-BED12 interval files with canonical typed columns and optional tabix-backed region filtering.
 
 Signature:
 
 ```sql
-read_bed(path, region := NULL, index_path := NULL, scan_mode := 'auto')
+read_bed(path, region := NULL, index_path := NULL, scan_mode := 'auto', error_policy := 'error')
 ```
 
 Returns:
@@ -1241,6 +759,18 @@ Returns:
 ```
 table
 ```
+
+### scan_mode
+
+scan_mode := 'sequential' forces full-file streaming/counting instead of index-backed count paths and is incompatible with region.
+
+### validation
+
+read_bed is a lenient reader, not a BEDv1 validator (https://samtools.github.io/hts-specs/BEDv1.pdf): it also reads UCSC track files, skipping track and browser lines, and it only rejects data lines with fewer than three tab-delimited fields. Coordinates are not checked against BEDv1: a non-integer chromStart/chromEnd reads as NULL and chromEnd < chromStart is returned as is, so filter those in SQL when strict BED is required.
+
+### error_policy
+
+error_policy := 'error' aborts on data lines with fewer than three tab-delimited fields; 'skip' drops those lines; 'report' emits them with NULL normal columns and adds error (VARCHAR), line_number (BIGINT, 1-based physical line including headers/comments), and raw_line (VARCHAR, without newline). Good rows have NULL error and raw_line. Report requires a full-file scan, not a region query. Non-integer numeric fields become NULL, reversed intervals remain accepted, and blank/header/track/browser lines are ignored in all modes.
 
 ### Examples
 
@@ -1358,48 +888,80 @@ BOOLEAN
 SELECT duckhts_cgranges_destroy('targets_idx');
 ```
 
-## duckhts_cgranges_from_query
-
-Execute a SQL query on an extension-owned DuckDB connection, append its interval rows into a session-scoped cgranges registry entry, and leave the populated index ready for explicit finalization with duckhts_cgranges_index(...).
-
-Signature:
-
-```sql
-duckhts_cgranges_from_query(name, query, chrom_col, start_col, end_col[, label_col])
-```
-
-Returns:
-
-```
-BOOLEAN
-```
-
-### Examples
-
-```sql
-SELECT duckhts_cgranges_from_query('targets_idx', 'SELECT chrom, start, "end", name FROM targets', 'chrom', 'start', 'end', 'name');
-```
-
 ## duckhts_cgranges_from_table
 
-Reserved convenience constructor for bulk cgranges population from a table name. The current implementation is intentionally deferred and directs callers to duckhts_cgranges_from_query(...).
+Create, populate and finalize a session-scoped cgranges registry entry from the rows of a table or view, on the caller's connection.
 
 Signature:
 
 ```sql
-duckhts_cgranges_from_table(name, table_name, chrom_col, start_col, end_col[, label_col])
+duckhts_cgranges_from_table(name, table_name, chrom_col, start_col, end_col)
 ```
 
 Returns:
 
 ```
-BOOLEAN
+table(indexed BOOLEAN)
 ```
+
+### Source
+
+table_name is any relation visible to the calling connection, including TEMP tables, views and uncommitted rows; build it from a query with CREATE TEMP VIEW. chrom_col, start_col, end_col and label_col name its columns. Use duckhts_cgranges_from_table for unlabeled intervals or duckhts_cgranges_from_table_labelled with label_col. The entry is created, filled and finalized in one statement and returns one TRUE row, so duckhts_cgranges_index(...) is not needed afterwards.
+
+### Errors
+
+The name must be new in the session. A failure while filling (NULL chrom, start or end, an unsupported label type, a coordinate outside int32) leaves the partly filled entry in place; remove it with duckhts_cgranges_destroy(...) before retrying.
+
+### Order
+
+Without label_col the label and interval_ordinal follow insertion order. A parallel scan of a large table does not fix that order, so pass label_col when a stable identity is needed.
+
+### SQL entry points
+
+duckhts_cgranges_from_table uses the base inputs. duckhts_cgranges_from_table_labelled requires label_col as an additional positional argument.
 
 ### Examples
 
 ```sql
-SELECT duckhts_cgranges_from_table('targets_idx', 'targets', 'chrom', 'start', 'end', 'name');
+SELECT * FROM duckhts_cgranges_from_table('targets_idx', 'targets', 'chrom', 'start', 'end');
+```
+
+## duckhts_cgranges_from_table_labelled
+
+Build and index a labelled interval index from a table or view.
+
+Signature:
+
+```sql
+duckhts_cgranges_from_table_labelled(name, table_name, chrom_col, start_col, end_col, label_col)
+```
+
+Returns:
+
+```
+table(indexed BOOLEAN)
+```
+
+### Source
+
+table_name is any relation visible to the calling connection, including TEMP tables, views and uncommitted rows; build it from a query with CREATE TEMP VIEW. chrom_col, start_col, end_col and label_col name its columns. Use duckhts_cgranges_from_table for unlabeled intervals or duckhts_cgranges_from_table_labelled with label_col. The entry is created, filled and finalized in one statement and returns one TRUE row, so duckhts_cgranges_index(...) is not needed afterwards.
+
+### Errors
+
+The name must be new in the session. A failure while filling (NULL chrom, start or end, an unsupported label type, a coordinate outside int32) leaves the partly filled entry in place; remove it with duckhts_cgranges_destroy(...) before retrying.
+
+### Order
+
+Without label_col the label and interval_ordinal follow insertion order. A parallel scan of a large table does not fix that order, so pass label_col when a stable identity is needed.
+
+### SQL entry points
+
+duckhts_cgranges_from_table uses the base inputs. duckhts_cgranges_from_table_labelled requires label_col as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_cgranges_from_table_labelled('targets_idx', 'targets_table', 'chrom', 'start', 'end', 'label');
 ```
 
 ## duckhts_cgranges_has_overlap
@@ -1462,10 +1024,14 @@ Returns:
 STRUCT(interval_ordinal BIGINT, label VARCHAR, label_type VARCHAR, interval_chrom VARCHAR, interval_start INTEGER, interval_end INTEGER)[]
 ```
 
+### Bulk probing
+
+This is the bulk overlap path for any relation of probes. Expand the list in the SELECT list, as in the example: a select-list UNNEST streams the hits, whereas CROSS JOIN UNNEST over the same list plans a lateral join that was several times slower in measurement. Use row_number() OVER () or an existing key to identify probes.
+
 ### Examples
 
 ```sql
-SELECT q.*, hit.interval_chrom, hit.interval_start, hit.interval_end, hit.label FROM read_bed('queries.bed') AS q CROSS JOIN UNNEST(duckhts_cgranges_overlaps_list('targets_idx', q.chrom, q.start, q."end")) AS u(hit);
+SELECT q.chrom, q.start, q."end", unnest(duckhts_cgranges_overlaps_list('targets_idx', q.chrom, q.start, q."end")) AS hit FROM read_bed('queries.bed') AS q;
 ```
 
 ## duckhts_cgranges_overlaps
@@ -1488,28 +1054,6 @@ table
 
 ```sql
 SELECT * FROM duckhts_cgranges_overlaps('targets_idx', 'chr1', 100, 150);
-```
-
-## duckhts_cgranges_overlaps_bulk
-
-Run a SQL query that yields overlap probes, stream those rows through a finalized session-scoped cgranges registry entry, and return one row per matching indexed interval. The probe query runs on the extension-owned helper connection, so it must reference regular tables/views rather than connection-local temp tables. When query_row_id_col is omitted, query_row_id defaults to the 1-based probe row ordinal.
-
-Signature:
-
-```sql
-duckhts_cgranges_overlaps_bulk(name, query, chrom_col, start_col, end_col, mode := 'overlap', query_row_id_col := NULL)
-```
-
-Returns:
-
-```
-table
-```
-
-### Examples
-
-```sql
-SELECT * FROM duckhts_cgranges_overlaps_bulk('targets_idx', 'SELECT probe_id, chrom, start, "end" FROM probes', 'chrom', 'start', 'end', query_row_id_col := 'probe_id');
 ```
 
 ## read_fastq
@@ -1590,9 +1134,39 @@ SELECT duckhts_fastq_qc(SEQUENCE, QUALITY) AS qc FROM read_fastq('reads.fastq.gz
 WITH q AS (SELECT duckhts_fastq_qc(SEQUENCE, QUALITY) AS qc FROM read_fastq('reads.fastq.gz')) SELECT cycle.* FROM q, UNNEST(qc.cycles) AS u(cycle);
 ```
 
+## duckhts_somalier_spacing
+
+Greedily select ranked Somalier candidate positions at a minimum genomic distance.
+
+Signature:
+
+```sql
+duckhts_somalier_spacing(positions UBIGINT[], distance UBIGINT)
+```
+
+Returns:
+
+```
+BOOLEAN[]
+```
+
+### Ordering
+
+positions must be ordered by AF rank within one chromosome. The returned mask has one element per input position; the first position wins each conflict, with equal positions conflicting. Positions are positive one-based integers; distance is positive and candidates are limited to one million per call.
+
+### Recipe
+
+Filter a typed read_bcf-style relation in SQL, group candidates by chromosome with list(CAST(POS AS UBIGINT) ORDER BY score, deterministic_tie_key), call this scalar on the ordered list, expand its Boolean mask, apply class-specific caps, and number the final rows by chromosome and position. rduckhts_somalier_find_sites() composes the complete recipe on the caller connection, including caller TEMP tables. No private connection or init-time macro is involved.
+
+### Examples
+
+```sql
+SELECT duckhts_somalier_spacing([100, 110, 109]::UBIGINT[], 10);
+```
+
 ## duckhts_somalier_import_sites
 
-Import an already selected Somalier sites VCF/BCF as one canonical panel and population-frequency relation.
+Import an already selected Somalier sites VCF/BCF as one canonical panel and population-frequency relation, autosomal and X/Y sites together.
 
 Signature:
 
@@ -1608,11 +1182,11 @@ table
 
 ### Orientation
 
-Each autosomal biallelic SNV is oriented into lexical allele_a/allele_b order. INFO/AF is the source ALT frequency and is transformed with REF/ALT, so population_b_af always describes allele_b. Dense zero-based site_index follows Somalier v0.3.4's lexical region then position order.
+Each biallelic SNV is oriented into lexical allele_a/allele_b order. INFO/AF is the source ALT frequency and is transformed with REF/ALT, so population_b_af always describes allele_b. Dense zero-based site_index numbers every autosomal site first, in Somalier v0.3.4's lexical region then position order, and then the X/Y sites in the same order, so the autosomal ordinals are 0..n-1 whatever the X/Y region names sort as.
 
 ### Input
 
-INFO/AF must declare Number=A,Type=Float. Retained records must be distinct uppercase A/C/G/T biallelic SNVs with one finite AF in [0,1]. Exact Somalier v0.3.4 X/Y aliases are excluded. Existing FILTER values are retained as provenance because this imports an already selected sites file; it does not apply selection policy.
+INFO/AF must declare Number=A,Type=Float. Retained records must be distinct uppercase A/C/G/T biallelic SNVs with one finite AF in [0,1]. Records on the exact Somalier v0.3.4 X/Y aliases (X, chrX, NC_000023.10, NC_000023.11, Y, chrY, NC_000024.9, NC_000024.10) are kept as sex-chromosome sites and at least one autosomal record is required to normalise their depth. No pseudo-autosomal filtering happens here or at count time, as in Somalier: choose X sites outside the PAR when selecting the sites file (rduckhts_somalier_find_sites does for human builds). Existing FILTER values are retained as provenance because this imports an already selected sites file; it does not apply selection policy.
 
 ### Scope
 
@@ -1650,7 +1224,7 @@ FORMAT/AD must declare Number=R,Type=Integer. Exact REF/ALT identity selects A a
 
 ### Scope and FILTER
 
-Symbolic alleles are unavailable in this scope. filter_policy='pass_or_unapplied' accepts PASS and dot but makes named failures unavailable; 'include_all' uses their AD; 'error' rejects them. source_method, count_scope, status, FILTER, record/sample ordinals and matched allele slots preserve extraction provenance. Full scans are sequential and retain physical source-record identity; Parquet is optional downstream storage, not an input requirement.
+Every panel site, autosomal or X/Y, is counted in the one pass. Symbolic alleles are unavailable in this scope. filter_policy='pass_or_unapplied' accepts PASS and dot but makes named failures unavailable; 'include_all' uses their AD; 'error' rejects them. X/Y sites ignore filter_policy and always use their AD, as Somalier extraction does. source_method, count_scope, status, FILTER, record/sample ordinals and matched allele slots preserve extraction provenance. Full scans are sequential and retain physical source-record identity; Parquet is optional downstream storage, not an input requirement.
 
 ### Examples
 
@@ -1676,20 +1250,776 @@ table
 
 ### Execution
 
-Exactly one of panel_table or panel_parquet supplies the canonical typed six-column panel. The panel is materialized and validated once, then worker_count partitions it into at most 64 DuckDB scan jobs. Each worker-local job owns one alignment handle, index, multi-region iterator, pileup, reference handle and bounded overlap workspace; no mutable htslib or faidx state is shared. DuckDB's connection thread setting limits concurrent jobs. decompression_threads separately controls htslib workers per alignment handle. Parallel output order is unspecified; use ORDER BY site_index when order matters.
+panel_parquet supplies the canonical typed six-column panel; panel_table is retained for signature compatibility and must be NULL. The panel is read from a local Parquet file when the query is bound, on the calling thread: a private in-memory DuckDB instance is opened and closed inside bind to materialize and validate it once. A prepared statement keeps that panel and reads nothing again. worker_count then partitions the sites into at most 64 DuckDB scan jobs, each counting into its own copy of the sites. Each worker-local job owns one alignment handle, index, multi-region iterator, pileup, reference handle and bounded overlap workspace; no mutable htslib or faidx state is shared. DuckDB's connection thread setting limits concurrent jobs. decompression_threads separately controls htslib workers per alignment handle. Parallel output order is unspecified; use ORDER BY site_index when order matters.
 
 ### Evidence
 
-A and B are exact uppercase panel bases; other counts every other observed base. Valid uncovered sites emit measured 0/0/0. Missing reference contigs or positions, reference mismatches, alignment-header contig absence and positions beyond a declared alignment contig emit NULL counts with a named unavailable status. Deletions and reference skips are not observed bases. MAPQ, base quality, required/excluded flags and overlap suppression are explicit per-call settings.
+Every panel site, autosomal or X/Y, is counted in the one scan. A and B are exact uppercase panel bases; other counts every other observed base. Valid uncovered sites emit measured 0/0/0. Missing reference contigs or positions, reference mismatches, alignment-header contig absence and positions beyond a declared alignment contig emit NULL counts with a named unavailable status. Deletions and reference skips are not observed bases. MAPQ, base quality, required/excluded flags and overlap suppression are explicit per-call settings.
 
 ### Limits and transport
 
-panel_table must name a committed table or view visible to the database; caller-local TEMP objects and uncommitted changes are not visible to panel preparation. One retained-connection preparation slot is shared by concurrent calls: nested or concurrent preparation returns a busy error and callers may retry. panel_parquet reads an ordinary Parquet file directly. max_sites bounds the shared panel. max_depth, max_overlap_qnames and max_region_bytes bound each active scan job; concurrent workspace can therefore grow with worker_count. remote_block_bytes, remote_cache_bytes and reference_cache_bytes apply per worker-owned handle, and zero disables that cache override. Explicit non-colocated BAM/CRAM and FASTA indexes are honored; CRAM keeps the alignment file's original @SQ lengths and does not create a default FASTA-index sidecar. overlap_policy='hileup_v0.1.0' pins encounter-order mate suppression only, while 'none' counts every retained observation.
+The private reader keeps no connection into the caller's database, so a closed database is released; it also cannot see the caller's tables, so write the panel with COPY ... TO 'panel.parquet' first (rduckhts_somalier_bam_counts does this for a panel_table). panel_parquet must be a local ordinary Parquet file: remote URLs are not read. max_sites bounds the shared panel. max_depth, max_overlap_qnames and max_region_bytes bound each active scan job; concurrent workspace can therefore grow with worker_count. remote_block_bytes, remote_cache_bytes and reference_cache_bytes apply per worker-owned handle, and zero disables that cache override. Explicit non-colocated BAM/CRAM and FASTA indexes are honored; CRAM keeps the alignment file's original @SQ lengths and does not create a default FASTA-index sidecar. overlap_policy='hileup_v0.1.0' pins encounter-order mate suppression only, while 'none' counts every retained observation. The panel reader never runs on a DuckDB worker thread: Rtools-built DuckDB hosts destroy a thread_local on freed memory when a worker that closed a DuckDB instance exits (see Runtime compatibility in the README).
 
 ### Examples
 
 ```sql
-CREATE TABLE allele_counts AS SELECT * FROM duckhts_somalier_bam_counts('sample.bam', 'fingerprint_panel', 'sample-1', 'reference.fa');
+CREATE TABLE allele_counts AS SELECT * FROM duckhts_somalier_bam_counts('sample.bam', NULL, 'sample-1', 'reference.fa', panel_parquet := 'fingerprint_panel.parquet');
+```
+
+## duckhts_ancestry_proportions
+
+Solve a nearest-positive-definite constrained ancestry projection from aggregated PC products.
+
+Signature:
+
+```sql
+duckhts_ancestry_proportions(x_pc_major, y_pc, group_count, sum_to_one := true)
+```
+
+Returns:
+
+```
+DOUBLE[]
+```
+
+### Input
+
+x_pc_major is a flat DOUBLE[] in PC-major, group-minor order for X = P^T F_ref; y_pc is a DOUBLE[] with one value per PC for (P^T f) times the shrinkage correction. Groups are ordered identically within each PC. 1 to 30 groups and 1 to 64 PCs are supported. All values must be finite. sum_to_one=true enforces nonnegative q summing to one; false allows a sum at most one. The scalar returns full-precision group proportions in input order; the R wrapper rounds displayed proportions to seven decimals after correlation gating.
+
+### Repair
+
+The Gram matrix X^T X follows Matrix::nearPD defaults: Dykstra alternating projections, relative eigen cutoff 1e-6, infinity-norm convergence tolerance 1e-7 and at most 100 iterations, then eigenvalue floor 1e-8 times the largest absolute eigenvalue with diagonal rescaling. A nonconverged repair errors. The native solver is independent of bigsnpr and quadprog code.
+
+### SQL recipe
+
+rduckhts_ancestry_proportions normalises long or keyed wide reference products to one row per locus with PC and group columns, checks long-reference completeness, unique input-matched reference loci and finite values at aligned sites, and matches sample_id, chromosome, positive one-based whole-number position and alleles from the caller's input-frequency relation. It reverses input frequency (1 - f) for reversed alleles, audits strand flips, and drops ambiguous, duplicate, missing and mismatched input sites. A bounded aligned Parquet relation holds the retained physical rows. Per-sample sums of loading * reference_frequency form X in PC-major, group-minor order; sums of loading * aligned_frequency times correction form y in PC order. The native scalar solves for q at full precision; cor(F_ref q, f) and per-group cor_each are evaluated before failed proportions are gated to NULL and returned proportions rounded. The scratch Parquet is removed after the call; no private connection or macro is created.
+
+### Missing data
+
+Input genotypes are diploid dosage / 2; NULL genotypes and frequencies are dropped, not imputed. bigsnpr imputes missing individual genotypes before calling snp_ancestry_summary, so parity comparisons must use the same retained sites. The default min_cor is 0.4 as in bigsnpr 1.12.21; callers may select a stricter gate for cohorts or low-depth count frequencies.
+
+### Examples
+
+```sql
+SELECT duckhts_ancestry_proportions([1.0, 0.0, 0.0, 1.0], [0.25, 0.75], 2, true);
+```
+
+## duckhts_roh_segments
+
+Decode runs of homozygosity from one sample's sorted per-chromosome site lists, reproducing bcftools roh.
+
+Signature:
+
+```sql
+duckhts_roh_segments(positions, af, pl, map_pos, map_cm, rec_rate, hw_to_az, az_to_hw)
+```
+
+Returns:
+
+```
+STRUCT(start BIGINT, "end" BIGINT, n_markers INTEGER, quality DOUBLE)[]
+```
+
+### Overloads
+
+duckhts_roh_segments(positions, af, pl, map_pos, map_cm, rec_rate, hw_to_az, az_to_hw) takes phred-scaled likelihoods as INTEGER[][] (three values per site: RR, RA, AA). duckhts_roh_segments(positions, af, dosage, gt_error, map_pos, map_cm, rec_rate, hw_to_az, az_to_hw) takes INTEGER[] genotype dosages 0, 1 or 2 and a phred gt_error, as bcftools roh -G does. duckhts_roh_segments(positions, af, ref_count, alt_count, seq_error, contamination, map_pos, map_cm, rec_rate, hw_to_az, az_to_hw) takes INTEGER[] read counts of the other allele and of the allele af refers to, a per-read seq_error in (0, 0.5) and a contamination fraction in [0, 1); duckhts_roh_counts describes that read model, which is a DuckHTS extension with no bcftools counterpart. All arguments are positional; the duckhts_roh macro supplies the defaults.
+
+### Input
+
+positions is a BIGINT[] of one-based coordinates, sorted ascending and all in 1..2147483647; af is a DOUBLE[] of ALT allele frequencies and pl or dosage a list of the same length, one entry per site. Build them per sample and chromosome with list(... ORDER BY pos). Lists of unequal length, NULL positions, unsorted positions, an af outside [0, 1], a dosage outside 0..2 and a hw_to_az or az_to_hw outside [0, 1] are errors that name the problem. A NULL list returns NULL; an empty list returns an empty list. One list is decoded at a time, so memory follows the longest list.
+
+### Skipped sites
+
+As in bcftools roh, a site is skipped when its position repeats the previous entry, its af is NULL, NaN or exactly 0, its genotype evidence is NULL or has NULL elements, its PL does not have three values or has a negative value, all three PL values are equal, or the likelihoods sum to zero. PL values above 255 count as 255. Skipped sites are not markers and do not break a run.
+
+### Model
+
+A two-state hidden Markov model, autozygous (AZ) and Hardy-Weinberg (HW), with initial probabilities 1/2, emissions P(D|AZ) = P(D|RR)(1-f) + P(D|AA)f and P(D|HW) = P(D|RR)(1-f)^2 + 2P(D|RA)f(1-f) + P(D|AA)f^2, and transitions hw_to_az (default 6.7e-8) and az_to_hw (default 5e-9) per base pair compounded over the physical distance between sites. Segments are the Viterbi AZ runs; quality is the mean forward-backward phred score of the sites in the run. start and end are the first and last marker of the run, inclusive.
+
+### Genetic map
+
+map_pos (BIGINT[], one-based, strictly ascending) and map_cm (DOUBLE[], cumulative centimorgans) are the nodes of a genetic map, the positions and third column of an IMPUTE2 map file. When both are given, the crossover terms between two sites are scaled by the map distance in Morgans, interpolated as bcftools roh -m does (the slope between the nodes that bracket the two sites, zero outside the map), and rec_rate, when given, scales it further. With no map and a positive rec_rate, the scale is the physical distance times rec_rate, as bcftools roh -M does. With neither, only the per-base-pair compounding applies. NULL map_pos and map_cm mean no map; giving one without the other, lists of unequal length or an empty map are errors.
+
+### Parity
+
+The arithmetic follows the pinned bcftools vcfroh.c and HMM.c operation for operation, so positions and marker counts equal bcftools roh and qualities agree to the one decimal bcftools prints; differences could arise only from the floating-point contraction choices of a different compiler or CPU.
+
+### Examples
+
+```sql
+SELECT duckhts_roh_segments([100, 200, 300], [0.3, 0.3, 0.3], [[0, 30, 60], [0, 30, 60], [0, 30, 60]], NULL::BIGINT[], NULL::DOUBLE[], NULL::DOUBLE, 6.7e-8, 5e-9);
+```
+
+## duckhts_roh
+
+Find runs of homozygosity in a VCF/BCF with the bcftools roh model, using allele frequencies from an INFO tag.
+
+Signature:
+
+```sql
+duckhts_roh(path, af_tag, hw_to_az := 6.7e-8, az_to_hw := 5e-9, gt_error := NULL, rec_rate := NULL, samples := NULL, max_sites := 20000000, max_site_bytes := 4294967296)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, chrom VARCHAR, start BIGINT, "end" BIGINT, length BIGINT, n_markers INTEGER, quality DOUBLE)
+```
+
+### Input
+
+path is a VCF/BCF with FORMAT/PL (default) or FORMAT/GT (gt_error set), read with read_bcf(tidy_format := true) on the caller's connection. af_tag names an INFO tag declared Type=Float, Number=A; its first value is the ALT allele frequency. Sites with an absent or missing tag, or a frequency of exactly 0, are skipped as bcftools roh skips them. Records with more than one ALT, no ALT, or a first ALT that is symbolic (<*>, <NON_REF>) are not analysed. samples uses read_bcf's selectors.
+
+### Output
+
+One row per run: sample, chrom, start and end (one-based, inclusive, the first and last marker), length = end - start + 1, n_markers and quality (mean forward-backward phred score), the RG lines of bcftools roh. Rows are not ordered; ORDER BY sample, chrom, start. Chromosomes are decoded separately and a run never spans two.
+
+### Genotype evidence
+
+gt_error NULL uses PL. A numeric gt_error (phred, bcftools -G, for example 30) uses diploid GT calls 0/0, 0/1 and 1/1 and ignores PL; other or missing genotypes are skipped, and FORMAT/PL need not exist. gt_error is an error of the site: the called genotype has likelihood close to 1 and a genotype one allele away has 10^(-gt_error/10), so one call that contradicts a run counts against it by that factor and no more, whatever caused it. A run can therefore continue through an isolated heterozygous call; a larger gt_error makes that rarer.
+
+### Transitions
+
+hw_to_az and az_to_hw are the per-base-pair transition probabilities (bcftools -a and -H). rec_rate is a constant recombination rate per base pair (bcftools -M). duckhts_roh_map takes genetic_map, a table name, with columns chrom, pos and cm (cumulative centimorgans at one-based positions, for example an IMPUTE2 map), interpolated as bcftools -m does; chromosomes without map rows are skipped, as bcftools skips a chromosome with no map file.
+
+### Memory
+
+DuckDB manages, and can spill, the scan and the joins. The sites of each sample and chromosome are held in native buffers of 16 bytes per site until that sample and chromosome is decoded, so memory follows samples times sites. max_sites caps one sample and chromosome (default 20,000,000; at most 100,000,000). max_site_bytes (default 4 GiB) bounds the buffers held at once: a decode does not grow a buffer when the bytes held by all ROH decodes in the process would pass its own max_site_bytes. Decodes that run at the same time with different values each apply their own, so the process total can pass the smaller value while the decode with the larger value allocates. Exceeding either limit is an error: decode fewer samples per query with samples, or raise the limit. When a query fails while the sites are being collected with 5 or more threads, DuckDB 1.5.x does not destroy the collecting states (https://github.com/duckdb/duckdb/issues/26871); their buffers stay charged against max_site_bytes until the process ends. On DuckDB 1.5.x, an out-of-memory error while these states, or the ordered genetic_map lists, are held can end the process instead of returning the error (https://github.com/duckdb/duckdb/issues/26441); raise memory_limit or decode fewer samples per query. Decoding one sample and chromosome also needs approximately 36.25 bytes per site of workspace in each thread: 4 bytes for position, 16 for emissions, 16 for forward/posterior probabilities and two traceback bits. For capacity n, these arrays use 36*n + ceil(n/4) + 16 bytes, excluding fixed tables and output segments. Model parameters and limits are checked even when the input has no record.
+
+### Limits
+
+Duplicate positions on a chromosome keep the first record to arrive, as bcftools roh keeps the first record in the file. That is the file order when one scan thread reads both records; deduplicate upstream when it matters. With a frequency relation (duckhts_roh_af_table, duckhts_roh_ancestry), only the records that match a frequency row take part. bcftools' default AC/AN frequencies, --AF-dflt, --estimate-AF, --include/--exclude, --skip-indels, --ignore-homref, --buffer-size and --viterbi-training are not offered.
+
+### Contig names
+
+The chrom of genetic_map is compared byte for byte with the contig names of the sites. A chromosome that the map spells differently (1 and chr1) is skipped like a chromosome without map rows, without an error. Rename the map's contigs in a view first.
+
+### SQL entry points
+
+duckhts_roh uses the base inputs. duckhts_roh_map requires genetic_map as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_roh('cohort.vcf.gz', 'AF') ORDER BY sample, chrom, start;
+```
+
+## duckhts_roh_map
+
+Find runs of homozygosity using an INFO allele frequency tag and a genetic map.
+
+Signature:
+
+```sql
+duckhts_roh_map(path, af_tag, genetic_map, hw_to_az := 6.7e-8, az_to_hw := 5e-9, gt_error := NULL, rec_rate := NULL, samples := NULL, max_sites := 20000000, max_site_bytes := 4294967296)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, chrom VARCHAR, start BIGINT, "end" BIGINT, length BIGINT, n_markers INTEGER, quality DOUBLE)
+```
+
+### Input
+
+path is a VCF/BCF with FORMAT/PL (default) or FORMAT/GT (gt_error set), read with read_bcf(tidy_format := true) on the caller's connection. af_tag names an INFO tag declared Type=Float, Number=A; its first value is the ALT allele frequency. Sites with an absent or missing tag, or a frequency of exactly 0, are skipped as bcftools roh skips them. Records with more than one ALT, no ALT, or a first ALT that is symbolic (<*>, <NON_REF>) are not analysed. samples uses read_bcf's selectors.
+
+### Output
+
+One row per run: sample, chrom, start and end (one-based, inclusive, the first and last marker), length = end - start + 1, n_markers and quality (mean forward-backward phred score), the RG lines of bcftools roh. Rows are not ordered; ORDER BY sample, chrom, start. Chromosomes are decoded separately and a run never spans two.
+
+### Genotype evidence
+
+gt_error NULL uses PL. A numeric gt_error (phred, bcftools -G, for example 30) uses diploid GT calls 0/0, 0/1 and 1/1 and ignores PL; other or missing genotypes are skipped, and FORMAT/PL need not exist. gt_error is an error of the site: the called genotype has likelihood close to 1 and a genotype one allele away has 10^(-gt_error/10), so one call that contradicts a run counts against it by that factor and no more, whatever caused it. A run can therefore continue through an isolated heterozygous call; a larger gt_error makes that rarer.
+
+### Transitions
+
+hw_to_az and az_to_hw are the per-base-pair transition probabilities (bcftools -a and -H). rec_rate is a constant recombination rate per base pair (bcftools -M). duckhts_roh_map takes genetic_map, a table name, with columns chrom, pos and cm (cumulative centimorgans at one-based positions, for example an IMPUTE2 map), interpolated as bcftools -m does; chromosomes without map rows are skipped, as bcftools skips a chromosome with no map file.
+
+### Memory
+
+DuckDB manages, and can spill, the scan and the joins. The sites of each sample and chromosome are held in native buffers of 16 bytes per site until that sample and chromosome is decoded, so memory follows samples times sites. max_sites caps one sample and chromosome (default 20,000,000; at most 100,000,000). max_site_bytes (default 4 GiB) bounds the buffers held at once: a decode does not grow a buffer when the bytes held by all ROH decodes in the process would pass its own max_site_bytes. Decodes that run at the same time with different values each apply their own, so the process total can pass the smaller value while the decode with the larger value allocates. Exceeding either limit is an error: decode fewer samples per query with samples, or raise the limit. When a query fails while the sites are being collected with 5 or more threads, DuckDB 1.5.x does not destroy the collecting states (https://github.com/duckdb/duckdb/issues/26871); their buffers stay charged against max_site_bytes until the process ends. On DuckDB 1.5.x, an out-of-memory error while these states, or the ordered genetic_map lists, are held can end the process instead of returning the error (https://github.com/duckdb/duckdb/issues/26441); raise memory_limit or decode fewer samples per query. Decoding one sample and chromosome also needs approximately 36.25 bytes per site of workspace in each thread: 4 bytes for position, 16 for emissions, 16 for forward/posterior probabilities and two traceback bits. For capacity n, these arrays use 36*n + ceil(n/4) + 16 bytes, excluding fixed tables and output segments. Model parameters and limits are checked even when the input has no record.
+
+### Limits
+
+Duplicate positions on a chromosome keep the first record to arrive, as bcftools roh keeps the first record in the file. That is the file order when one scan thread reads both records; deduplicate upstream when it matters. With a frequency relation (duckhts_roh_af_table, duckhts_roh_ancestry), only the records that match a frequency row take part. bcftools' default AC/AN frequencies, --AF-dflt, --estimate-AF, --include/--exclude, --skip-indels, --ignore-homref, --buffer-size and --viterbi-training are not offered.
+
+### Contig names
+
+The chrom of genetic_map is compared byte for byte with the contig names of the sites. A chromosome that the map spells differently (1 and chr1) is skipped like a chromosome without map rows, without an error. Rename the map's contigs in a view first.
+
+### SQL entry points
+
+duckhts_roh uses the base inputs. duckhts_roh_map requires genetic_map as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_roh_map('cohort.vcf.gz', 'AF', 'genetic_map') ORDER BY sample, chrom, start;
+```
+
+## duckhts_roh_af_table
+
+Find runs of homozygosity in a VCF/BCF with the bcftools roh model, using allele frequencies from a caller relation.
+
+Signature:
+
+```sql
+duckhts_roh_af_table(path, af_table, hw_to_az := 6.7e-8, az_to_hw := 5e-9, gt_error := NULL, rec_rate := NULL, samples := NULL, max_sites := 20000000, max_site_bytes := 4294967296)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, chrom VARCHAR, start BIGINT, "end" BIGINT, length BIGINT, n_markers INTEGER, quality DOUBLE)
+```
+
+### Frequencies
+
+af_table is a table or view name with columns chrom, pos (one-based), ref, alt and af, like a bcftools --AF-file. A record takes the frequency of the row matching its chrom, pos, REF and its ALT alleles joined by commas; a record without a matching row is not used and does not claim a repeated position, and a record whose row has a NULL af is skipped. bcftools roh --AF-file chooses differently at a repeated position; duckhts_roh_af_table_bcftools follows it. Give one row per key; af must be in [0, 1], and exactly 0 skips the site. This is the entry point for per-sample frequencies, for example ancestry-tuned ones, by running it once per relation.
+
+### Otherwise
+
+Everything else is as duckhts_roh: the same output, genotype evidence (PL, or GT with gt_error), transition parameters, genetic-map form, memory limits and limits.
+
+### Contig names
+
+The chrom of af_table is compared with the VCF's CHROM byte for byte. When the two spell contigs differently (1 and chr1), no record finds a frequency and the function returns no rows, without an error. Rename the contigs of af_table to the VCF's spelling in a view first; duckhts_contig_key() gives a common key.
+
+### SQL entry points
+
+duckhts_roh_af_table uses the base inputs. duckhts_roh_af_table_map requires genetic_map as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_roh_af_table('cohort.vcf.gz', 'site_frequencies') ORDER BY sample, chrom, start;
+```
+
+## duckhts_roh_af_table_map
+
+Find runs of homozygosity using matching allele frequencies and a genetic map.
+
+Signature:
+
+```sql
+duckhts_roh_af_table_map(path, af_table, genetic_map, hw_to_az := 6.7e-8, az_to_hw := 5e-9, gt_error := NULL, rec_rate := NULL, samples := NULL, max_sites := 20000000, max_site_bytes := 4294967296)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, chrom VARCHAR, start BIGINT, "end" BIGINT, length BIGINT, n_markers INTEGER, quality DOUBLE)
+```
+
+### Frequencies
+
+af_table is a table or view name with columns chrom, pos (one-based), ref, alt and af, like a bcftools --AF-file. A record takes the frequency of the row matching its chrom, pos, REF and its ALT alleles joined by commas; a record without a matching row is not used and does not claim a repeated position, and a record whose row has a NULL af is skipped. bcftools roh --AF-file chooses differently at a repeated position; duckhts_roh_af_table_bcftools follows it. Give one row per key; af must be in [0, 1], and exactly 0 skips the site. This is the entry point for per-sample frequencies, for example ancestry-tuned ones, by running it once per relation.
+
+### Otherwise
+
+Everything else is as duckhts_roh: the same output, genotype evidence (PL, or GT with gt_error), transition parameters, genetic-map form, memory limits and limits.
+
+### Contig names
+
+The chrom of af_table is compared with the VCF's CHROM byte for byte. When the two spell contigs differently (1 and chr1), no record finds a frequency and the function returns no rows, without an error. Rename the contigs of af_table to the VCF's spelling in a view first; duckhts_contig_key() gives a common key.
+
+### SQL entry points
+
+duckhts_roh_af_table uses the base inputs. duckhts_roh_af_table_map requires genetic_map as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_roh_af_table_map('cohort.vcf.gz', 'site_frequencies', 'genetic_map') ORDER BY sample, chrom, start;
+```
+
+## duckhts_roh_af_table_bcftools
+
+Find runs of homozygosity like duckhts_roh_af_table, choosing the record of a repeated listed position as bcftools roh --AF-file does.
+
+Signature:
+
+```sql
+duckhts_roh_af_table_bcftools(path, af_table, hw_to_az := 6.7e-8, az_to_hw := 5e-9, gt_error := NULL, rec_rate := NULL, samples := NULL, max_sites := 20000000, max_site_bytes := 4294967296, af_order := NULL)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, chrom VARCHAR, start BIGINT, "end" BIGINT, length BIGINT, n_markers INTEGER, quality DOUBLE)
+```
+
+### Frequencies
+
+af_table is as for duckhts_roh_af_table. bcftools reads only the first line of a position, and a relation has no line order, so without af_order af_table must give at most one row per position: more is an error that names the position.
+
+### File order
+
+af_order names a column of af_table that gives the order of its lines, for example a line number the caller adds, or FILE_OFFSET when the frequencies come from read_bcf(). The name is matched without case. At each position the row with the least af_order value stands for the first line, and only that row is used. A NULL af_order value, a value repeated within a position (each error names the position), or a name that is not a column of af_table is an error.
+
+### Site rule
+
+In file order (read_bcf's FILE_OFFSET), as bcftools 1.23 and 1.24 do: a record whose indel class differs from the row's is passed over when the next record of the file has the same POS, on any contig and listed or not, since bcftools compares POS only; the row is an indel when any of its alleles is longer than one character, and a record is one when HTSlib's bcf_get_variant_types() sets VCF_INDEL (an MNP such as AC>GT and a complex ACG>AT are not; duckhts__htslib_is_indel(ref, alts) is the port). A record with no non-symbolic ALT, or several, claims nothing; the first remaining record claims the position, which is skipped unless that record's REF and ALT equal the row's. A claiming record whose first ALT is symbolic (<*>, <NON_REF>) is skipped too, where bcftools would decode its second allele.
+
+### Input
+
+path must be a BGZF-compressed VCF or BCF; other compression is an error. It must also be sorted, as bcftools roh requires, so that the records of a position and of a contig are contiguous in the file; that is not checked.
+
+### Cost
+
+Besides the genotype scan of duckhts_roh_af_table, one more scan without samples reads CHROM, POS, REF, ALT and FILE_OFFSET; records whose POS af_table does not list are only counted per contig, so the extra state is one row per contig and per record at a listed POS. af_table is scanned three times rather than held; af_order adds its column to two of those scans and no other scan.
+
+### Otherwise
+
+Everything else is as duckhts_roh: the same output, genotype evidence (PL, or GT with gt_error), transition parameters, genetic-map form and memory limits.
+
+### SQL entry points
+
+duckhts_roh_af_table_bcftools uses the base inputs. duckhts_roh_af_table_bcftools_map requires genetic_map as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_roh_af_table_bcftools('cohort.vcf.gz', 'site_frequencies') ORDER BY sample, chrom, start;
+```
+
+```sql
+SELECT * FROM duckhts_roh_af_table_bcftools('cohort.vcf.gz', 'af_file_lines', af_order := 'line') ORDER BY sample, chrom, start;
+```
+
+## duckhts_roh_af_table_bcftools_map
+
+Find runs of homozygosity using bcftools AF-file site selection and a genetic map.
+
+Signature:
+
+```sql
+duckhts_roh_af_table_bcftools_map(path, af_table, genetic_map, hw_to_az := 6.7e-8, az_to_hw := 5e-9, gt_error := NULL, rec_rate := NULL, samples := NULL, max_sites := 20000000, max_site_bytes := 4294967296, af_order := NULL)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, chrom VARCHAR, start BIGINT, "end" BIGINT, length BIGINT, n_markers INTEGER, quality DOUBLE)
+```
+
+### Frequencies
+
+af_table is as for duckhts_roh_af_table. bcftools reads only the first line of a position, and a relation has no line order, so without af_order af_table must give at most one row per position: more is an error that names the position.
+
+### File order
+
+af_order names a column of af_table that gives the order of its lines, for example a line number the caller adds, or FILE_OFFSET when the frequencies come from read_bcf(). The name is matched without case. At each position the row with the least af_order value stands for the first line, and only that row is used. A NULL af_order value, a value repeated within a position (each error names the position), or a name that is not a column of af_table is an error.
+
+### Site rule
+
+In file order (read_bcf's FILE_OFFSET), as bcftools 1.23 and 1.24 do: a record whose indel class differs from the row's is passed over when the next record of the file has the same POS, on any contig and listed or not, since bcftools compares POS only; the row is an indel when any of its alleles is longer than one character, and a record is one when HTSlib's bcf_get_variant_types() sets VCF_INDEL (an MNP such as AC>GT and a complex ACG>AT are not; duckhts__htslib_is_indel(ref, alts) is the port). A record with no non-symbolic ALT, or several, claims nothing; the first remaining record claims the position, which is skipped unless that record's REF and ALT equal the row's. A claiming record whose first ALT is symbolic (<*>, <NON_REF>) is skipped too, where bcftools would decode its second allele.
+
+### Input
+
+path must be a BGZF-compressed VCF or BCF; other compression is an error. It must also be sorted, as bcftools roh requires, so that the records of a position and of a contig are contiguous in the file; that is not checked.
+
+### Cost
+
+Besides the genotype scan of duckhts_roh_af_table, one more scan without samples reads CHROM, POS, REF, ALT and FILE_OFFSET; records whose POS af_table does not list are only counted per contig, so the extra state is one row per contig and per record at a listed POS. af_table is scanned three times rather than held; af_order adds its column to two of those scans and no other scan.
+
+### Otherwise
+
+Everything else is as duckhts_roh: the same output, genotype evidence (PL, or GT with gt_error), transition parameters, genetic-map form and memory limits.
+
+### SQL entry points
+
+duckhts_roh_af_table_bcftools uses the base inputs. duckhts_roh_af_table_bcftools_map requires genetic_map as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_roh_af_table_bcftools_map('cohort.vcf.gz', 'af_file_lines', 'genetic_map', af_order := 'line') ORDER BY sample, chrom, start;
+```
+
+## duckhts_roh_ancestry
+
+Find runs of homozygosity using each sample's ancestry-weighted allele frequencies.
+
+Signature:
+
+```sql
+duckhts_roh_ancestry(path, reference_table, proportions_table, af_clamp := 1e-3, hw_to_az := 6.7e-8, az_to_hw := 5e-9, gt_error := NULL, rec_rate := NULL, samples := NULL, max_sites := 20000000, max_site_bytes := 4294967296)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, chrom VARCHAR, start BIGINT, "end" BIGINT, length BIGINT, n_markers INTEGER, quality DOUBLE)
+```
+
+### Inputs
+
+reference_table is a long relation with chromosome, position (one-based), allele_a, allele_b, group_id and frequency (frequency of allele_b). proportions_table has sample_id, group_id and proportion. Both relations must use exactly the same group IDs; every called VCF sample needs proportions. Contig names are matched with duckhts_contig_key(), resolved once per distinct name. It removes one leading chr case-insensitively, writes M/MT as MT and uppercases X and Y, so chr1 and 1 match, as do chrX and X. Accessions, patches and numeric sex chromosomes are not mapped. Each site must have one allele orientation across its group rows, and exactly one row per group.
+
+### Frequency model
+
+For each called site and sample, AF is the sum over groups of proportion times group frequency. The reference is aggregated once per site and proportions once per sample, then joined to called sites. REF=allele_a and ALT=allele_b uses the weighted frequency; the reversed orientation uses 1-AF. Reference alleles must be on the forward strand of the VCF's assembly, as in a FASTA-anchored panel; no strand flip is attempted, so palindromic (A/T, C/G) sites are oriented by REF like any other, and a record whose alleles match neither order is not used and does not claim a repeated position. af_clamp in [0, 0.5) clamps AF to [af_clamp, 1-af_clamp]; zero disables clamping. The default avoids interpreting a population frequency of zero as impossible.
+
+### Otherwise
+
+The output, genotype evidence, transitions, genetic-map form, memory limits and limits are as duckhts_roh_af_table.
+
+### SQL entry points
+
+duckhts_roh_ancestry uses the base inputs. duckhts_roh_ancestry_map requires genetic_map as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_roh_ancestry('cohort.vcf.gz', 'reference_long', 'sample_proportions', gt_error := 30) ORDER BY sample, chrom, start;
+```
+
+## duckhts_roh_ancestry_map
+
+Find runs of homozygosity using ancestry-weighted frequencies and a genetic map.
+
+Signature:
+
+```sql
+duckhts_roh_ancestry_map(path, reference_table, proportions_table, genetic_map, af_clamp := 1e-3, hw_to_az := 6.7e-8, az_to_hw := 5e-9, gt_error := NULL, rec_rate := NULL, samples := NULL, max_sites := 20000000, max_site_bytes := 4294967296)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, chrom VARCHAR, start BIGINT, "end" BIGINT, length BIGINT, n_markers INTEGER, quality DOUBLE)
+```
+
+### Inputs
+
+reference_table is a long relation with chromosome, position (one-based), allele_a, allele_b, group_id and frequency (frequency of allele_b). proportions_table has sample_id, group_id and proportion. Both relations must use exactly the same group IDs; every called VCF sample needs proportions. Contig names are matched with duckhts_contig_key(), resolved once per distinct name. It removes one leading chr case-insensitively, writes M/MT as MT and uppercases X and Y, so chr1 and 1 match, as do chrX and X. Accessions, patches and numeric sex chromosomes are not mapped. Each site must have one allele orientation across its group rows, and exactly one row per group.
+
+### Frequency model
+
+For each called site and sample, AF is the sum over groups of proportion times group frequency. The reference is aggregated once per site and proportions once per sample, then joined to called sites. REF=allele_a and ALT=allele_b uses the weighted frequency; the reversed orientation uses 1-AF. Reference alleles must be on the forward strand of the VCF's assembly, as in a FASTA-anchored panel; no strand flip is attempted, so palindromic (A/T, C/G) sites are oriented by REF like any other, and a record whose alleles match neither order is not used and does not claim a repeated position. af_clamp in [0, 0.5) clamps AF to [af_clamp, 1-af_clamp]; zero disables clamping. The default avoids interpreting a population frequency of zero as impossible.
+
+### Otherwise
+
+The output, genotype evidence, transitions, genetic-map form, memory limits and limits are as duckhts_roh_af_table.
+
+### SQL entry points
+
+duckhts_roh_ancestry uses the base inputs. duckhts_roh_ancestry_map requires genetic_map as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_roh_ancestry_map('cohort.vcf.gz', 'reference_long', 'sample_proportions', 'genetic_map', gt_error := 30) ORDER BY sample, chrom, start;
+```
+
+## duckhts_roh_counts
+
+Find runs of homozygosity from allele read counts, with sequencing error, optional contamination, allele balance and a site artefact term.
+
+Signature:
+
+```sql
+duckhts_roh_counts(counts_table, seq_error := 1e-3, contamination := 0.0, hw_to_az := 6.7e-8, az_to_hw := 5e-9, rec_rate := NULL, max_sites := 20000000, max_site_bytes := 4294967296, allele_balance := 0.5, artefact_weight := 0.0)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, chrom VARCHAR, start BIGINT, "end" BIGINT, length BIGINT, n_markers INTEGER, quality DOUBLE)
+```
+
+### Input
+
+counts_table is a table or view with sample_id, chrom, pos (one-based), ref_count, alt_count and af, one row per sample and site. alt_count counts reads showing the allele whose population frequency is af; ref_count counts reads showing the other allele. Any frequency source composes in SQL first: an INFO tag, a frequency table or ancestry-weighted frequencies. Somalier site counts map as ref_count = a, alt_count = b and af = frequency of allele_b.
+
+### Fitted parameters
+
+seq_error, contamination, allele_balance and artefact_weight mean what duckhts_count_error_fit reports under these names. Use duckhts_roh_counts_fitted(counts_table, fit_table, ...) to supply all four per sample from a caller-named relation; in R, pass fit_table to rduckhts_roh_counts.
+
+### Read model
+
+Each read shows the counted allele with probability (1 - contamination) * q + contamination * c, where q is seq_error, allele_balance or 1 - seq_error for zero, one or two copies, and c is the mean of q over the genotype of a contaminating individual of the same population (Hardy-Weinberg at af). Reads are independent, so a site's alt count is binomial. With chance artefact_weight the alt count is instead uniform on 0 to depth, whatever the genotype: each genotype's likelihood is (1 - artefact_weight) * binomial + artefact_weight / (depth + 1), the form duckhts_count_error_fit uses. The resulting genotype likelihoods enter the bcftools roh model in place of PL. This emission is a DuckHTS extension; bcftools roh has no read-count mode.
+
+### What the two numbers do
+
+allele_balance is the share of a heterozygote's reads that show the counted allele; values below 0.5 model reference-biased mapping. artefact_weight is the chance that a site's counts do not reflect its genotype (a mapping artefact, a paralogous read or a bad panel site). With artefact_weight w > 0, one site at depth d changes the odds between the two HMM states by a factor of at most 1 + (d + 1)(1 - w) / w (about 10,300 at d = 30 and w = 0.003), as gt_error caps one called genotype at 10^(gt_error / 10). The defaults, 0.5 and 0, give the decode without these terms, bit for bit.
+
+### Relation to genotype evidence
+
+seq_error is an error of one read, and the reads of a site multiply. With artefact_weight 0, a site with balanced reads excludes both homozygous genotypes whatever seq_error is, so the read-count decode corresponds to the GT decode with no tolerated genotype error: it ends a run at a heterozygous site that duckhts_roh with gt_error := 30 would pass through, and reports fewer bases in runs. benchmarks/benchmark_roh_counts_validation.md measures this on three 1000 Genomes samples, at artefact_weight 0. A positive artefact_weight bounds each site's influence as gt_error does.
+
+### Guards
+
+allele_balance must be in [0.35, 0.65] and artefact_weight in [0, 0.05]; a value outside is an error, never clipped, also when counts_table is empty. The fit measures allele_balance 0.4974 to 0.4984 and artefact_weight 0.18% to 0.30% of sites on three 30x chr20 samples (benchmarks/benchmark_count_error_fit.md); the ranges hold such values with wide margins. Beyond them a value points to copy number, a mixture or a broken panel, which one number per sample does not describe. The SQL tests check that allele_balance +-0.01 and artefact_weight up to 0.004 move no run end of the synthetic titration fixture by more than one site.
+
+### Skipped sites
+
+Sites with no reads, a NULL count, or an af that is NULL, NaN or 0 are skipped; a repeated position keeps one row, as in the other ROH macros. The relation need not be sorted. Negative counts, fractional counts, seq_error outside (0, 0.5) and contamination outside [0, 1) are errors.
+
+### Limitations
+
+Biallelic sites only; one error rate for all reads, with no base- or mapping-quality, duplicate or strand modelling, and binomial counts (the spreads of duckhts_count_error_fit are not used). allele_balance is one value per sample, but reference-biased mapping is stronger where flanking heterozygosity is high; such heterozygotes can still look homozygous and lengthen runs in divergent regions. The contaminant genotype is averaged per read rather than drawn once per site as in the fit; both give a read the same chance. A contaminant from a different population than af describes is approximated by af.
+
+### Otherwise
+
+Output, transitions, rec_rate, the genetic-map form and the memory limits are as duckhts_roh, with 24 bytes per site.
+
+### Contig names
+
+The chrom of genetic_map is compared byte for byte with the contig names of the sites. A chromosome that the map spells differently (1 and chr1) is skipped like a chromosome without map rows, without an error. Rename the map's contigs in a view first.
+
+### SQL entry points
+
+duckhts_roh_counts uses the base inputs. duckhts_roh_counts_map requires genetic_map as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_roh_counts('site_counts', contamination := 0.02) ORDER BY sample, chrom, start;
+```
+
+## duckhts_roh_counts_map
+
+Find runs of homozygosity from read counts using a genetic map.
+
+Signature:
+
+```sql
+duckhts_roh_counts_map(counts_table, genetic_map, seq_error := 1e-3, contamination := 0.0, hw_to_az := 6.7e-8, az_to_hw := 5e-9, rec_rate := NULL, max_sites := 20000000, max_site_bytes := 4294967296, allele_balance := 0.5, artefact_weight := 0.0)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, chrom VARCHAR, start BIGINT, "end" BIGINT, length BIGINT, n_markers INTEGER, quality DOUBLE)
+```
+
+### Input
+
+counts_table is a table or view with sample_id, chrom, pos (one-based), ref_count, alt_count and af, one row per sample and site. alt_count counts reads showing the allele whose population frequency is af; ref_count counts reads showing the other allele. Any frequency source composes in SQL first: an INFO tag, a frequency table or ancestry-weighted frequencies. Somalier site counts map as ref_count = a, alt_count = b and af = frequency of allele_b.
+
+### Fitted parameters
+
+seq_error, contamination, allele_balance and artefact_weight mean what duckhts_count_error_fit reports under these names. Use duckhts_roh_counts_fitted(counts_table, fit_table, ...) to supply all four per sample from a caller-named relation; in R, pass fit_table to rduckhts_roh_counts.
+
+### Read model
+
+Each read shows the counted allele with probability (1 - contamination) * q + contamination * c, where q is seq_error, allele_balance or 1 - seq_error for zero, one or two copies, and c is the mean of q over the genotype of a contaminating individual of the same population (Hardy-Weinberg at af). Reads are independent, so a site's alt count is binomial. With chance artefact_weight the alt count is instead uniform on 0 to depth, whatever the genotype: each genotype's likelihood is (1 - artefact_weight) * binomial + artefact_weight / (depth + 1), the form duckhts_count_error_fit uses. The resulting genotype likelihoods enter the bcftools roh model in place of PL. This emission is a DuckHTS extension; bcftools roh has no read-count mode.
+
+### What the two numbers do
+
+allele_balance is the share of a heterozygote's reads that show the counted allele; values below 0.5 model reference-biased mapping. artefact_weight is the chance that a site's counts do not reflect its genotype (a mapping artefact, a paralogous read or a bad panel site). With artefact_weight w > 0, one site at depth d changes the odds between the two HMM states by a factor of at most 1 + (d + 1)(1 - w) / w (about 10,300 at d = 30 and w = 0.003), as gt_error caps one called genotype at 10^(gt_error / 10). The defaults, 0.5 and 0, give the decode without these terms, bit for bit.
+
+### Relation to genotype evidence
+
+seq_error is an error of one read, and the reads of a site multiply. With artefact_weight 0, a site with balanced reads excludes both homozygous genotypes whatever seq_error is, so the read-count decode corresponds to the GT decode with no tolerated genotype error: it ends a run at a heterozygous site that duckhts_roh with gt_error := 30 would pass through, and reports fewer bases in runs. benchmarks/benchmark_roh_counts_validation.md measures this on three 1000 Genomes samples, at artefact_weight 0. A positive artefact_weight bounds each site's influence as gt_error does.
+
+### Guards
+
+allele_balance must be in [0.35, 0.65] and artefact_weight in [0, 0.05]; a value outside is an error, never clipped, also when counts_table is empty. The fit measures allele_balance 0.4974 to 0.4984 and artefact_weight 0.18% to 0.30% of sites on three 30x chr20 samples (benchmarks/benchmark_count_error_fit.md); the ranges hold such values with wide margins. Beyond them a value points to copy number, a mixture or a broken panel, which one number per sample does not describe. The SQL tests check that allele_balance +-0.01 and artefact_weight up to 0.004 move no run end of the synthetic titration fixture by more than one site.
+
+### Skipped sites
+
+Sites with no reads, a NULL count, or an af that is NULL, NaN or 0 are skipped; a repeated position keeps one row, as in the other ROH macros. The relation need not be sorted. Negative counts, fractional counts, seq_error outside (0, 0.5) and contamination outside [0, 1) are errors.
+
+### Limitations
+
+Biallelic sites only; one error rate for all reads, with no base- or mapping-quality, duplicate or strand modelling, and binomial counts (the spreads of duckhts_count_error_fit are not used). allele_balance is one value per sample, but reference-biased mapping is stronger where flanking heterozygosity is high; such heterozygotes can still look homozygous and lengthen runs in divergent regions. The contaminant genotype is averaged per read rather than drawn once per site as in the fit; both give a read the same chance. A contaminant from a different population than af describes is approximated by af.
+
+### Otherwise
+
+Output, transitions, rec_rate, the genetic-map form and the memory limits are as duckhts_roh, with 24 bytes per site.
+
+### Contig names
+
+The chrom of genetic_map is compared byte for byte with the contig names of the sites. A chromosome that the map spells differently (1 and chr1) is skipped like a chromosome without map rows, without an error. Rename the map's contigs in a view first.
+
+### SQL entry points
+
+duckhts_roh_counts uses the base inputs. duckhts_roh_counts_map requires genetic_map as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_roh_counts_map('site_counts', 'genetic_map', contamination := 0.02) ORDER BY sample, chrom, start;
+```
+
+## duckhts_roh_counts_fitted
+
+Find runs of homozygosity from allele read counts using per-sample fitted error, contamination, allele balance and artefact weight, with the share of each run that the artefact weight's interval does not move and the bases a higher weight would add next to it.
+
+Signature:
+
+```sql
+duckhts_roh_counts_fitted(counts_table, fit_table, hw_to_az := 6.7e-8, az_to_hw := 5e-9, rec_rate := NULL, max_sites := 20000000, max_site_bytes := 4294967296)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, chrom VARCHAR, start BIGINT, "end" BIGINT, length BIGINT, n_markers INTEGER, quality DOUBLE, stable_fraction DOUBLE, gained_bases BIGINT)
+```
+
+### Fit relation
+
+fit_table is a caller-named table or view with one row per sample and columns sample, seq_error, contamination, allele_balance, artefact_weight and artefact_weight_sd, such as the output of duckhts_count_error_fit; other columns are ignored. sample joins to counts_table.sample_id, with a NULL sample matching a NULL sample_id as in duckhts_roh_counts and duckhts_count_error_fit. For each sample of counts_table, a missing fit row, a NULL value of one of the four fitted numbers or more than one fit row is an explicit error naming the sample and problem, whatever DuckDB's scalar_subquery_error_on_multiple_rows setting. A relation without one of the five columns is a binder error. Fit rows of samples that counts_table does not hold are not checked, so empty counts give no rows; the other arguments are still checked. Each value must be in the range of the scalar argument of duckhts_roh_counts: seq_error in (0, 0.5), contamination in [0, 1), allele_balance in [0.35, 0.65] and artefact_weight in [0, 0.05], finite; a fitted value outside is an error, not clipped. artefact_weight_sd must be finite and at least 0; a NULL counts as 0. Fit status filtering belongs in the caller's SQL. The spreads are not used.
+
+### Decode
+
+Counts, emissions, the run columns, transitions, genetic-map form and memory limits are identical to duckhts_roh_counts: sample through quality equal its output at each sample's four numbers. Only the four fitted numbers vary by sample. In R, pass fit_table to rduckhts_roh_counts; its scalar seq_error, contamination, allele_balance and artefact_weight arguments are unused.
+
+### Stability
+
+The runs depend on artefact_weight more than on the other fitted numbers, and the fit gives an interval for it. Each sample is decoded three times from one collection of its sites: at its artefact_weight w, and at w - artefact_weight_sd and w + artefact_weight_sd, each kept in [0, 0.05]. The rows are the runs of the decode at w; stable_fraction is the share of a run's bases that are also in a run of both other decodes, from 0 to 1. A run with stable_fraction 1 does not depend on where w lies within one standard error; a low value marks a run whose call hinges on the artefact weight. Filter on it, or weight run bases by it, to report the runs or bases the fit's interval does not move. stable_fraction sees only bases a run would lose; gained_bases guards the other direction (see Gained bases). A NULL artefact_weight_sd (a fit with fewer than three blocks) counts as 0, so every run gets stable_fraction 1 and gained_bases 0; check the fit's blocks or status as well. The two extra decodes share the site lists and the kernel workspace, so memory is that of duckhts_roh_counts plus, for the list a thread decodes, 24 bytes per run of the two extra decodes and 16 per run at w, and decode time is about three times as long.
+
+### Gained bases
+
+gained_bases is the number of bases that the decode at w + artefact_weight_sd calls next to a run at w but outside every run at w, from the same decode as stable_fraction. A run at w + sd meets a run at w when the two share a base or abut (the end of one is one base before the start of the other). Each base of a run at w + sd that meets some run at w, and that lies outside every run at w, counts for exactly one run at w: a base before the first run at w that the run at w + sd meets counts for that run; any other base counts for the last run at w before it. So a gap that the higher weight closes between two runs counts once, for the run before the gap, and an extension past a run's end counts for that run. Bases of a run at w + sd that meets no run at w belong to no row and are not reported; a higher weight can call such new runs. A high gained_bases marks a run that a higher weight would extend or join to its neighbour.
+
+### SQL entry points
+
+duckhts_roh_counts_fitted uses the base inputs. duckhts_roh_counts_fitted_map requires genetic_map as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_roh_counts_fitted('site_counts', 'sample_fits') ORDER BY sample, chrom, start;
+```
+
+```sql
+SELECT sample, sum(length) AS run_bases, sum(length * stable_fraction) AS stable_run_bases FROM duckhts_roh_counts_fitted('site_counts', 'sample_fits') GROUP BY sample;
+```
+
+## duckhts_roh_counts_fitted_map
+
+Decode read-count ROH with per-sample fitted parameters and a genetic map.
+
+Signature:
+
+```sql
+duckhts_roh_counts_fitted_map(counts_table, fit_table, genetic_map, hw_to_az := 6.7e-8, az_to_hw := 5e-9, rec_rate := NULL, max_sites := 20000000, max_site_bytes := 4294967296)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, chrom VARCHAR, start BIGINT, "end" BIGINT, length BIGINT, n_markers INTEGER, quality DOUBLE, stable_fraction DOUBLE, gained_bases BIGINT)
+```
+
+### Fit relation
+
+fit_table is a caller-named table or view with one row per sample and columns sample, seq_error, contamination, allele_balance, artefact_weight and artefact_weight_sd, such as the output of duckhts_count_error_fit; other columns are ignored. sample joins to counts_table.sample_id, with a NULL sample matching a NULL sample_id as in duckhts_roh_counts and duckhts_count_error_fit. For each sample of counts_table, a missing fit row, a NULL value of one of the four fitted numbers or more than one fit row is an explicit error naming the sample and problem, whatever DuckDB's scalar_subquery_error_on_multiple_rows setting. A relation without one of the five columns is a binder error. Fit rows of samples that counts_table does not hold are not checked, so empty counts give no rows; the other arguments are still checked. Each value must be in the range of the scalar argument of duckhts_roh_counts: seq_error in (0, 0.5), contamination in [0, 1), allele_balance in [0.35, 0.65] and artefact_weight in [0, 0.05], finite; a fitted value outside is an error, not clipped. artefact_weight_sd must be finite and at least 0; a NULL counts as 0. Fit status filtering belongs in the caller's SQL. The spreads are not used.
+
+### Decode
+
+Counts, emissions, the run columns, transitions, genetic-map form and memory limits are identical to duckhts_roh_counts: sample through quality equal its output at each sample's four numbers. Only the four fitted numbers vary by sample. In R, pass fit_table to rduckhts_roh_counts; its scalar seq_error, contamination, allele_balance and artefact_weight arguments are unused.
+
+### Stability
+
+The runs depend on artefact_weight more than on the other fitted numbers, and the fit gives an interval for it. Each sample is decoded three times from one collection of its sites: at its artefact_weight w, and at w - artefact_weight_sd and w + artefact_weight_sd, each kept in [0, 0.05]. The rows are the runs of the decode at w; stable_fraction is the share of a run's bases that are also in a run of both other decodes, from 0 to 1. A run with stable_fraction 1 does not depend on where w lies within one standard error; a low value marks a run whose call hinges on the artefact weight. Filter on it, or weight run bases by it, to report the runs or bases the fit's interval does not move. stable_fraction sees only bases a run would lose; gained_bases guards the other direction (see Gained bases). A NULL artefact_weight_sd (a fit with fewer than three blocks) counts as 0, so every run gets stable_fraction 1 and gained_bases 0; check the fit's blocks or status as well. The two extra decodes share the site lists and the kernel workspace, so memory is that of duckhts_roh_counts plus, for the list a thread decodes, 24 bytes per run of the two extra decodes and 16 per run at w, and decode time is about three times as long.
+
+### Gained bases
+
+gained_bases is the number of bases that the decode at w + artefact_weight_sd calls next to a run at w but outside every run at w, from the same decode as stable_fraction. A run at w + sd meets a run at w when the two share a base or abut (the end of one is one base before the start of the other). Each base of a run at w + sd that meets some run at w, and that lies outside every run at w, counts for exactly one run at w: a base before the first run at w that the run at w + sd meets counts for that run; any other base counts for the last run at w before it. So a gap that the higher weight closes between two runs counts once, for the run before the gap, and an extension past a run's end counts for that run. Bases of a run at w + sd that meets no run at w belong to no row and are not reported; a higher weight can call such new runs. A high gained_bases marks a run that a higher weight would extend or join to its neighbour.
+
+### SQL entry points
+
+duckhts_roh_counts_fitted uses the base inputs. duckhts_roh_counts_fitted_map requires genetic_map as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_roh_counts_fitted_map('site_counts', 'sample_fits', 'genetic_map') ORDER BY sample, chrom, start;
+```
+
+## duckhts_count_error_fit
+
+Fit read error, contamination and allele balance of each sample by maximum likelihood from allele read counts at sites of known population frequency.
+
+Signature:
+
+```sql
+duckhts_count_error_fit(counts_table, block_bases := 10000000, freq_bins := 64, max_depth := 1000, min_block_sites := 1000, max_cells := 5000000, max_cell_bytes := 1073741824)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, sites BIGINT, reads BIGINT, mean_depth DOUBLE, blocks INTEGER, seq_error DOUBLE, contamination DOUBLE, contamination_sd DOUBLE, homozygosity_excess DOUBLE, allele_balance DOUBLE, spread_hom DOUBLE, spread_het DOUBLE, artefact_weight DOUBLE, artefact_weight_sd DOUBLE, log_likelihood DOUBLE, contamination_relative DOUBLE, log_likelihood_relative DOUBLE, status VARCHAR, method VARCHAR)
+```
+
+### Input
+
+counts_table is the relation duckhts_roh_counts takes: sample_id, chrom, pos (one-based), ref_count, alt_count and af, one row per sample and site, where alt_count counts reads showing the allele whose population frequency is af. Any frequency source composes in SQL first, for example ancestry-weighted frequencies. Sites with a NULL count, no reads, more than max_depth reads (the two counts are summed as BIGINT), or an af that is NULL, NaN, 0 or 1 are skipped; a sample whose sites are all skipped keeps its row. Negative or fractional counts are errors, as is a NULL, non-positive or fractional pos, or a fractional option. Block k of a chromosome holds the positions k * block_bases + 1 to (k + 1) * block_bases.
+
+### Model
+
+A site's sample genotype has 0, 1 or 2 copies of the counted allele with Hardy-Weinberg chances at af, moved toward homozygosity by homozygosity_excess; a second genome contributes a share contamination of the reads, with its own genotype drawn once per site (unrelated: Hardy-Weinberg; relative: one allele of the sample's genotype and one draw at af). A read shows the allele with chance seq_error, allele_balance or 1 - seq_error for 0, 1 or 2 copies, mixed over the two genomes. The alt count is beta-binomial with spread spread_hom at homozygous and spread_het at heterozygous sites (0 is the binomial). With chance artefact_weight a site's alt count is uniform on 0..depth whatever its genotype. All seven are fitted together by Nelder-Mead from two starts on the histogram of (block, frequency bin, depth, alt count) cells, so the likelihood depends on a site only through its counts and the mean frequency of its cell.
+
+### Output
+
+One row per sample: the fitted seven numbers, the log-likelihood, and contamination_relative with log_likelihood_relative from the same cells with a parent or child as the second genome; the sites and reads used and their mean depth. Each block of block_bases bases with at least min_block_sites sites is refitted for contamination with the other parameters held at the whole-sample fit, and contamination_sd is the standard deviation of those block estimates divided by the square root of their number (NULL with fewer than three blocks). Each such block is also refitted for artefact_weight alone, the other parameters held the same way, and artefact_weight_sd is formed from those estimates as contamination_sd is; duckhts_roh_counts_fitted uses it for stable_fraction. status is ok, no_sites (a sample whose sites were all skipped: sites 0, the numbers NULL), few_sites (under 1,000 sites), few_blocks (under three refitted blocks), at_bound (contamination, seq_error or artefact_weight at its upper bound), no_convergence or no_convergence_relative; method names the fit and its version.
+
+### What the numbers are
+
+seq_error is the chance that a read shows the other allele at a homozygous site. With a mask of known variants absent, it holds site artefacts that artefact_weight does not absorb. homozygosity_excess is a nuisance parameter: it also absorbs any difference between the sample's population and the frequencies given, so it is not inbreeding. contamination is the share of reads of a second genome of the frequencies' population; a second genome of another population biases it upward (benchmarks/benchmark_count_error_fit.md measures the size on a count-level mixture of two 1000 Genomes samples of different populations), and a relative is fitted at about half its share by the unrelated model, which contamination_relative reports under the other hypothesis. The intervals come from the blocks, not from the likelihood, because sites are linked.
+
+### Limits
+
+Memory: DuckDB builds the histogram and can spill it; the native buffer of a sample holds 16 bytes per cell, at most max_cells cells. max_cell_bytes bounds the native histogram memory of the process at once, each limit with an explicit error: the buffers of the aggregate (16 bytes per cell, up to three times that while a buffer grows) and the working memory of the running fits (24 bytes per cell, 88 bytes per distinct (depth, alt count) pair and 24 bytes per depth up to the deepest). The BLOB that carries a sample's cells from the aggregate to its fit is DuckDB's memory, under its memory_limit. When a query fails while the histogram is being built with 5 or more threads, DuckDB 1.5.x does not destroy the states of the parallel aggregate (https://github.com/duckdb/duckdb/issues/26871); their buffers stay charged against max_cell_bytes until the process ends. On DuckDB 1.5.x, an out-of-memory error while the histogram states are held can end the process instead of returning the error (https://github.com/duckdb/duckdb/issues/26441); raise memory_limit or fit fewer samples per query. A sample has at most 65,536 blocks and 1,024 frequency bins. Depth is capped by max_depth, which bounds the cells; deeper sites are left out. One fit runs on one thread; the fits of a query's samples run in the threads that hold their rows, so more threads fit more samples at once (the report measures the gain at four threads).
+
+### Examples
+
+```sql
+SELECT sample, seq_error, contamination, contamination_sd, status FROM duckhts_count_error_fit('site_counts');
+```
+
+## duckhts_count_mixture_lowpass
+
+Estimate a conditional second-genome share from calibrated low-pass read and discordant-pair moments.
+
+Signature:
+
+```sql
+duckhts_count_mixture_lowpass(counts_table, seq_error, artefact_weight, homozygosity_excess, block_bases := 10000000, max_depth := 8, min_blocks := 30, max_blocks := 512, max_candidates := 16, max_state_bytes := 268435456)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, candidate VARCHAR, relationship_model VARCHAR, share DOUBLE, share_lower DOUBLE, share_upper DOUBLE, share_se DOUBLE, singles_share DOUBLE, singles_se DOUBLE, pair_residual DOUBLE, pair_residual_se DOUBLE, pair_denominator DOUBLE, discordance_ratio DOUBLE, seq_error DOUBLE, artefact_weight DOUBLE, homozygosity_excess DOUBLE, moment_score DOUBLE, max_block_leverage DOUBLE, sites BIGINT, usable_sites BIGINT, zero_depth_sites BIGINT, singleton_sites BIGINT, reads BIGINT, other_reads BIGINT, positive_pair_sites BIGINT, excluded_sites BIGINT, concordant_ref_pairs BIGINT, discordant_pairs BIGINT, concordant_alt_pairs BIGINT, unavailable_sites BIGINT, blocks BIGINT, pair_blocks BIGINT, score_rank BIGINT, jackknife_failed_refits BIGINT, at_bound BOOLEAN, matched_frequencies BOOLEAN, interval_hull BOOLEAN, status VARCHAR, relation_diagnostic VARCHAR, method VARCHAR)
+```
+
+### Input contract
+
+counts_table contains sample_id, candidate, chrom, one-based whole pos, ref_count, alt_count, other_count, sample_af and candidate_af. The frequencies describe the allele counted by alt_count. Sample, candidate and chromosome identifiers are nonempty. One row per sample/candidate/chrom/pos is required; counts and sample_af must agree across candidates at a site. Counts are nonnegative whole BIGINT values. Frequencies are NULL or finite in [0,1]; a site missing any candidate row/frequency or any count is unavailable to every candidate of that sample. Zero-depth and singleton sites remain in QC. Depth is ref_count + alt_count; deeper-than-max_depth sites are excluded, not truncated. other_count contributes to QC only. Calibration is required and fixed: seq_error in [0,0.5), artefact_weight in [0,1), homozygosity_excess in [0,1]. Positions k * block_bases + 1 through (k + 1) * block_bases share a chromosome-local block.
+
+### Output
+
+One row per sample/candidate/relationship_model; unrelated is always present. An ibd1 row requires exact numerical candidate_af = sample_af at every site, including zero-depth, unavailable-count and excluded sites; NULL frequencies do not match. An empty input returns no rows; a sample with zero usable reads retains a no_sites row with NULL share. QC pair counts are choose(ref_count,2), ref_count*alt_count and choose(alt_count,2), over usable, non-excluded sites only. pair_denominator is SUM(choose(depth,2)*sample_af*(1-sample_af)); discordance_ratio uses that baseline-one denominator, not twice it, and is NULL if it is zero. blocks counts informative blocks (pair-bearing for matched frequencies, read-bearing otherwise); pair_blocks counts pair-bearing blocks. score_rank is the retained block covariance rank, using a relative eigenvalue cutoff of 1e-10. moment_score is the squared weighted moment discrepancy. max_block_leverage is the largest read or pair exposure fraction; jackknife_failed_refits counts unusable deletions. at_bound flags a share near 0 or 0.5. interval_hull flags limits spanning disconnected accepted share sets. method is duckhts_count_mixture_lowpass v1.
+
+### Model and intervals
+
+The share is constrained to [0,0.5]. First moments use the basis (1,f,g); discordant-pair moments use (1,f,g,f*f,f*g,g*g). A two-pass generalized moment fit builds a rank-revealing weight matrix from centered block residuals at an exposure-normalized first fit. Genotypes are HWE with fixed sample homozygosity excess; unrelated draws a second independent HWE genotype at candidate_af. The matched IBD1 hypothesis draws one transmitted sample allele and one independent allele at sample_af. Sequencing error maps q to seq_error+(1-2*seq_error)*q. The uniform alt-count artefact has mean allele fraction 1/2 and discordant-pair probability 1/3 at every depth. singles_share is the unbounded calibrated read-moment regression diagnostic, with block-jackknife singles_se. pair_residual is observed minus unrelated-predicted discordant-pair probability at singles_share, with its deletion standard error. The whole conditional share is refitted after deleting each read-bearing block with calibration fixed; share_se is the delete-one-block jackknife standard error, not the spread of independently fitted block shares. Limits invert the whole-fit score, using jackknife variance to calibrate interior curvature and the block-covariance chi-square(1) score cutoff at a share bound. The 95 percent limits are clipped to [0,0.5]. Fewer than min_blocks informative blocks yields NULL limits and insufficient_blocks while retaining an identified point share; default 30, at least 2. Lowering the floor is for small fixtures and does not establish interval coverage. Failed refits, zero covariance rank or gross moment mismatch yield NULL limits. The gross-mismatch screen uses df + 2*sqrt(df*log(1000)) + 2*log(1000), df = score_rank-1, as a conservative chi-square tail threshold.
+
+### Validation
+
+The linked phased chr20 campaign uses 1 Mb blocks and 50 replicates per stratum, not the genome-wide release target of 200. It does not establish reliable detection of 1-2 percent shares at 0.1x; many point-accuracy thresholds fail even at larger shares. Interval coverage alone is not evidence of adequate point precision. Matched-frequency IBD1 fits can be uninformative, and count thinning retains single-source calibration offsets and missing intervals. The autosomal campaign evaluates 90 strata with 200 replicates each, including both error calibrations; 75 strata are primary. At a 5 percent share, unrelated second genomes give a positive interval lower limit in 199-200 of 200 replicates at 0.1x, versus 160-165 of 200 for IBD1; at 0.4x all tested relationships give 200 of 200 positive limits. These call rates do not establish a calibrated detection limit: only 30 of 75 primary strata meet every declared criterion, and 5 of 15 primary null strata fail the false-positive upper-bound requirement. Frequency anchors include the simulated genomes. No universal share detection limit or genome-wide accuracy guarantee is established. See benchmarks/benchmark_count_mixture_lowpass.md and benchmarks/benchmark_count_mixture_lowpass_genome.md for all strata, denominators and failures.
+
+### Interpretation as a conditional share
+
+The estimate is conditional on both populations' supplied frequencies and on external error, artefact and homozygosity calibration. It is not an unconditional biological fraction and is not calibrated for arbitrary low-input DNA or cell-free DNA. Matched-frequency unrelated and IBD1 models can have identical first and second moments: relation_diagnostic is unresolved rather than selecting a relationship by score. With population contrast and enough blocks, the block-standardized pair residual is compatible_unrelated within 1.96 standard errors, shared_allele_signal below that range, or model_mismatch above it; lack of information gives uninformative. A shared-allele signal is a diagnostic, not a relationship classification. Status is ok_conditional, no_sites, no_pairs, no_population_contrast, insufficient_blocks, nonidentified, uninformative or model_mismatch. Flat moments give a NULL share; no_population_contrast marks read-only data without frequency contrast, and nonidentified also marks covariance-rank failure. Interval coverage at the block floor is not guaranteed.
+
+### Limits
+
+block_bases is positive whole, max_depth is 1..65535, min_blocks is 2..2147483647, max_blocks is 1..4096 (default 512), max_candidates is 1..64 per sample (default 16), and max_state_bytes is positive whole (default 256 MiB). Native state retains only fixed-size block moments, never sites or a depth histogram. Its aggregate buffers and fit copies use the shared native count-state byte budget; exceeding the active query limit returns an error. DuckDB owns exact binary per-block sums, SQL validation/joins/sorts/spill and the state BLOB, under its memory_limit, not max_state_bytes. Each non-negative moment accumulator uses 152 bytes independently of site count and rounds once to binary64; SQL validation and joins still require input-sized state. Blocks are sorted before fitting so input order and thread count do not change the result. One fit uses fixed-size numerical workspace and one thread; delete-one-block refits take quadratic work in the number of blocks. DuckDB 1.5.x may retain parallel aggregate states after an aggregate error (https://github.com/duckdb/duckdb/issues/26871); such retained buffers remain charged until process exit. This separate estimator does not change duckhts_count_error_fit.
+
+### Examples
+
+```sql
+SELECT sample, candidate, relationship_model, share, share_lower, share_upper, relation_diagnostic, status FROM duckhts_count_mixture_lowpass('lowpass_counts', 0.01, 0.02, 0.0);
 ```
 
 ## duckhts_somalier_panel_sha256
@@ -1710,7 +2040,7 @@ VARCHAR
 
 ### Panel contract
 
-panel_table has assembly, dense zero-based site_index, region, positive one-based position, allele_a and allele_b. Assembly and region are each limited to 1,024 bytes before hashing. One nonempty assembly, unique physical region/position and uppercase single-base A/C/G/T alleles in lexical A < B order are required. The pinned Somalier v0.3.4 X/Y aliases are rejected; other aliases cannot be biologically classified from a region string. The calculation assumes diploid three-state genotypes. The digest commits to this domain and every ordered site, independent of physical row order.
+panel_table has assembly, dense zero-based site_index, region, positive one-based position, allele_a and allele_b. Assembly and region are each limited to 1,024 bytes before hashing. One nonempty assembly, unique physical region/position and uppercase single-base A/C/G/T alleles in lexical A < B order are required. The pinned Somalier v0.3.4 X/Y aliases are sex-chromosome sites; every other region is autosomal, since other aliases cannot be classified from a region string. Every autosomal site_index must precede every X/Y site_index. The digest commits to this domain (panel version 3: biallelic SNVs, autosomal then sex-chromosome sites) and every ordered site, independent of physical row order. Panels digested before this version have different identities.
 
 ### Examples
 
@@ -1736,7 +2066,7 @@ VARCHAR
 
 ### Frequency contract
 
-frequency_table must cover every panel site exactly once with the same assembly, ordinal, coordinate and A/B orientation plus a finite population_b_af in [0,1]. The digest commits to the panel identity and every ordered frequency value.
+frequency_table must cover every autosomal panel site exactly once (X/Y rows are ignored) with the same assembly, ordinal, coordinate and A/B orientation plus a finite population_b_af in [0,1]. The digest commits to the panel identity and every ordered frequency value.
 
 ### Examples
 
@@ -1792,7 +2122,7 @@ table(sketch STRUCT)
 
 ### Evidence
 
-evidence_table contains sample_id, the six panel identity columns, and nullable a, b and other counts. Each sample must contain every panel ordinal exactly once. Count channels already follow the panel's canonical lexical A/B order; changed coordinates or orientation error. Counts are never inferred from GT or DP. All-NULL tuples are unavailable, all-zero tuples are measured zero depth, and partial NULL tuples error.
+evidence_table contains sample_id, the six panel identity columns, and nullable a, b and other counts. Each sample must contain every panel ordinal exactly once. Panel and evidence rows on the X/Y aliases are ignored: this is an autosomal statistic, and results equal those on the autosomal-only panel. The reported panel identity is the whole panel's. Count channels already follow the panel's canonical lexical A/B order; changed coordinates or orientation error. Counts are never inferred from GT or DP. All-NULL tuples are unavailable, all-zero tuples are measured zero depth, and partial NULL tuples error.
 
 ### Persistence
 
@@ -1856,12 +2186,50 @@ The struct retains sample and panel identities, method version, status, jointly-
 
 ### Execution
 
-Both sketches must have identical panel digests, site counts and classification settings. Mask words are borrowed directly; comparison allocates no pair-sized workspace. SQL chooses the requested pair relation and output ordering.
+Both sketches must have identical panel digests, site counts and classification settings. The contents of both sketches are checked for every call, so comparing every pair of a cohort repeats that check for each pair; use duckhts_somalier_relatedness_all_pairs for all pairs. Mask words are borrowed directly; comparison allocates no pair-sized workspace. SQL chooses the requested pair relation and output ordering.
 
 ### Examples
 
 ```sql
-SELECT unnest(duckhts_somalier_relatedness(a.sketch, b.sketch, 1000000)) FROM sample_sketches a JOIN sample_sketches b ON a.sketch.sample_id < b.sketch.sample_id;
+SELECT unnest(duckhts_somalier_relatedness(a.sketch, b.sketch, 1000000)) FROM selected_pairs p JOIN sample_sketches a ON a.sketch.sample_id = p.sample_a JOIN sample_sketches b ON b.sketch.sample_id = p.sample_b;
+```
+
+## duckhts_somalier_relatedness_all_pairs
+
+Compute Somalier-derived relatedness and concordance statistics for every unordered sample pair of one sketch relation.
+
+Signature:
+
+```sql
+duckhts_somalier_relatedness_all_pairs(sketches_table, max_sites := 1000000, max_pairs := 50000000)
+```
+
+Returns:
+
+```
+table
+```
+
+### Input
+
+sketches_table names a relation with one non-NULL sketch column per sample, as duckhts_somalier_prepare_sketches returns. Two sketches of one sample, a NULL sketch, a sketch with more sites than max_sites, or a sketch whose masks do not match its stored content digest is an error. All sketches must share assembly, panel digest, site count and classification settings; a mixed relation is an error. These checks run once over the relation, so they hold for a query that reads no pair column, for example count(*).
+
+### Results
+
+One row per unordered pair with sample_a < sample_b, with the fields of duckhts_somalier_relatedness as columns. The rows equal those of duckhts_somalier_relatedness over the same pairs. No row order is guaranteed.
+
+### Execution
+
+Each sketch is content-checked once and the pairs are compared from the checked sketches, so the content checks grow with the number of samples and the comparisons with pairs times sites. The pair indexes are split into at most 65,536 blocks of consecutive indexes. DuckDB scans the blocks in chunks of up to 2,048, one chunk per task, so at most 32 of its threads compare pairs. The rows do not depend on the thread count.
+
+### Limits
+
+The output has N(N-1)/2 rows for N samples. max_pairs must be a positive, finite whole number; a relation with more pairs than max_pairs is an error before any pair is compared. The default, 50,000,000, is 400 times the pairs of 500 samples. Memory model for N sketches of S sites, each with three masks of ceil(S/64) 64-bit words: the checked sketches form one list in sample_id order, which the query holds in a few shared copies. Each thread copies the list once for each chunk of blocks it scans and reads both sketches of every pair of that chunk in place from its copy. The workspace of a thread is therefore one copy of the list plus fixed 2,048-row vectors of pair indexes and results: it grows with N times S, not with the pairs, and the pair indexes are never collected. See benchmarks/benchmark_somalier_cohort_scaling.md for measured time and memory.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_somalier_relatedness_all_pairs('sample_sketches');
 ```
 
 ## duckhts_somalier_verify_relatedness
@@ -1912,7 +2280,7 @@ table(contamination STRUCT)
 
 ### Inputs
 
-Count evidence and population_b_af must match the panel's full ordered site identity. CHARR uses measured counts, its own homozygous-like binomial eligibility and the pinned 4% other-read filter; relatedness genotype masks are insufficient.
+Count evidence and population_b_af must match the panel's full ordered site identity. Panel and evidence rows on the X/Y aliases are ignored: this is an autosomal statistic, and results equal those on the autosomal-only panel. The reported panel identity is the whole panel's. CHARR uses measured counts, its own homozygous-like binomial eligibility and the pinned 4% other-read filter; relatedness genotype masks are insufficient.
 
 ### Results
 
@@ -1950,7 +2318,7 @@ table(contamination STRUCT)
 
 ### Direction
 
-pairs_table contains distinct receiver_id and anchor_id rows. The anchor supplies the receiver's expected uncontaminated homozygous genotype; it is not assumed to identify the contaminating donor. Reversing a pair is a different fit.
+pairs_table contains distinct receiver_id and anchor_id rows. Panel and evidence rows on the X/Y aliases are ignored: this is an autosomal statistic, and results equal those on the autosomal-only panel. The reported panel identity is the whole panel's. The anchor supplies the receiver's expected uncontaminated homozygous genotype; it is not assumed to identify the contaminating donor. Reversing a pair is a different fit.
 
 ### Results
 
@@ -1962,7 +2330,7 @@ The query certifies each distinct measured depth once, then prepares one bounded
 
 ### Limits
 
-Panel assembly and region are each limited to 1,024 bytes. Persisted profiles separately limit sample_id and assembly to 1,024 bytes. A+B depth must not exceed max_depth. max_threshold_work bounds cumulative exact binomial certification steps and is at most 100,000,000; exhaustion errors without publishing profiles. max_sites is at most 100,000,000, and max_evaluations must fit the declared search workspace.
+Panel assembly and region are each limited to 1,024 bytes. Persisted profiles separately limit sample_id and assembly to 1,024 bytes. A+B depth must not exceed max_depth. max_threshold_work bounds cumulative exact binomial certification steps and is at most 100,000,000; exhaustion errors without publishing profiles. max_sites is at most 100,000,000, and max_evaluations must fit the declared search workspace. The site profiles are ordered list aggregates, one per sample: on DuckDB 1.5.x, an out-of-memory error while they are built can end the process instead of returning the error (https://github.com/duckdb/duckdb/issues/26441), and a query that fails while they are built with 5 or more threads keeps their memory until the process ends (https://github.com/duckdb/duckdb/issues/26871); raise memory_limit or pass fewer samples per query.
 
 ### Numerical difference
 
@@ -1972,6 +2340,52 @@ DuckHTS searches a full 0.01 grid and refines a feasible local optimum rather th
 
 ```sql
 SELECT unnest(contamination) FROM duckhts_somalier_matched_contamination('allele_counts', 'fingerprint_panel', 'population_frequencies', 'receiver_anchor_pairs');
+```
+
+## duckhts_somalier_sex
+
+Report X/Y dosage evidence and a review-only XX, XY or ambiguous call per sample from panel counts.
+
+Signature:
+
+```sql
+duckhts_somalier_sex(counts_table, panel_table, min_depth := 7, min_sex_site_depth := 7, min_het_balance := 0.3, hom_balance_cutoff := 0.01, min_usable_x_sites := 11, xy_max_het_ratio := 0.05, xx_min_het_ratio := 0.4, y_signal_min := 0.4, y_gate := 'sample')
+```
+
+Returns:
+
+```
+table
+```
+
+### Inputs
+
+counts_table is the sample-by-panel relation from duckhts_somalier_vcf_counts() or duckhts_somalier_bam_counts() over a panel that includes X/Y sites; each sample needs one row for every panel site with the panel's geometry and A/B orientation. Coverage is checked per sample from the row count plus the sum and XOR of a 64-bit hash of site_index against the panel's, because a per-sample DISTINCT set would hold samples x sites entries: a missing or repeated ordinal changes the count or the hashes and is rejected, while a different multiset of ordinals with the same count passes only if both hashes collide. Autosomal sites give the depth normaliser, X and Y sites the metrics. Without a usable X site the panel is still accepted and the status says so.
+
+### Metrics
+
+Follows Somalier v0.3.4 relate.nim. autosomal_depth_mean is the mean A+B depth of autosomal sites with other <= 10% of all reads and A+B >= min_depth. An X or Y site is usable when other <= 4%, A+B >= min_sex_site_depth and its B balance is homozygous (below hom_balance_cutoff, above one minus it, or A or B zero) or heterozygous (between min_het_balance and one minus it); x_hom_ref, x_het and x_hom_alt count usable X sites by genotype. x_depth_ratio and y_depth_ratio are 2 * mean A+B depth over usable sites / autosomal_depth_mean, so a diploid X is about 2 and a single X about 1. x_het_hom_alt_ratio is x_het / x_hom_alt (Infinity when there is no hom-alt site and some het site, NULL when both are zero), the statistic Somalier thresholds. Ratios are NULL without usable sites or autosomal depth; the integer counts stay exact zeros. Floating means can differ from Somalier's running mean in the last bits.
+
+### Call
+
+inferred_sex is XY when there are at least min_usable_x_sites usable X sites (Somalier: more than 10) and x_het_hom_alt_ratio < xy_max_het_ratio, XX when it is > xx_min_het_ratio, otherwise ambiguous. y_signal is present when y_depth_ratio > y_signal_min and absent otherwise, NULL without usable Y sites. An XX dosage with a present Y signal is reported as ambiguous with the review flag apparent_y_with_xx_dosage, and an XY dosage with an absent Y signal keeps XY with apparent_y_loss, as Somalier notes. status is ok, no_usable_x_sites, insufficient_x_sites or no_autosomal_depth.
+
+### Y gate
+
+Somalier applies its Y check only when the cohort has Y depth (more than five samples, or more than 10%, with usable Y sites), so a sample's call depends on who else is in the batch. The default y_gate := 'sample' applies the check whenever the sample itself has a Y signal; y_gate := 'cohort' reproduces Somalier's gate, and cohort_has_y reports it. Somalier also leaves the sex unset for samples that fail its autosomal quality gate; DuckHTS reports the X dosage regardless and reports no_autosomal_depth when the normaliser is missing.
+
+### Interpretation
+
+The call is evidence of X/Y dosage for review, not a diagnosis or a legal determination of sex; aneuploidy, mosaicism, poor coverage and sample swaps all change it. Results also carry the whole-panel digest, panel denominators and every threshold used.
+
+### Memory
+
+See benchmarks/benchmark_somalier_sex.md for measured scaling. One pass over the counts relation: state is one aggregate group of a few numbers per sample plus the panel; no product of samples and sites is retained beyond the counts relation itself.
+
+### Examples
+
+```sql
+SELECT sample_id, inferred_sex, status, x_depth_ratio, y_depth_ratio FROM duckhts_somalier_sex('allele_counts', 'fingerprint_panel');
 ```
 
 ## detect_quality_encoding
@@ -1998,12 +2412,12 @@ SELECT * FROM detect_quality_encoding('reads.fq.gz');
 
 ## read_gff
 
-Read GFF annotations with optional raw scalar and parsed list/pair attributes, strict GFF3 validation and indexed region selection.
+Read GFF annotations with optional parsed attributes, strict GFF3 validation and indexed region selection.
 
 Signature:
 
 ```sql
-read_gff(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, attributes_map := FALSE, attributes_list := FALSE, attributes_pairs := FALSE, strict := FALSE, region := NULL, index_path := NULL, scan_mode := 'auto')
+read_gff(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, attributes_map := FALSE, attributes_list := FALSE, attributes_pairs := FALSE, attributes := []::VARCHAR[], strict := FALSE, region := NULL, index_path := NULL, scan_mode := 'auto')
 ```
 
 Returns:
@@ -2011,6 +2425,18 @@ Returns:
 ```
 table
 ```
+
+### Map keys
+
+attributes_map leaves out an attribute whose key is not valid UTF-8, since a MAP key cannot be NULL; a value that is not valid UTF-8 is NULL.
+
+### Missing keys
+
+A requested key absent from every feature yields NULL on every row, exactly as attributes_map[key] does. GFF declares no attribute vocabulary, so binding does not scan the file to validate key presence; that would require a full extra pass. Assert presence with an aggregate, for example: SELECT CASE WHEN count(ID) > 0 THEN true ELSE error('ID is all NULL') END FROM read_gff('annotations.gff', attributes := ['ID']);
+
+### Attributes
+
+attributes := ['Parent', 'ID'] appends VARCHAR columns named for the requested keys. Each value equals attributes_map[key], including NULL for absent keys; repeated keys use the first value and GFF3 percent encoding is retained. Key lookup is case-sensitive, as GFF3 tags are: attributes := ['id'] on a file that uses ID returns a column of NULLs. Keys must be nonempty and distinct from fixed and optional attribute column names; because column names ignore case, two keys that differ only in case are rejected. Only projected keys are parsed during scanning.
 
 ### Scanning
 
@@ -2024,12 +2450,12 @@ SELECT seqname, feature, start, "end" FROM read_gff('gff_file.gff.gz') LIMIT 5;
 
 ## read_gtf
 
-Read GTF annotations with optional raw scalar and parsed list/pair attributes and indexed region selection.
+Read GTF annotations with optional parsed attributes and indexed region selection.
 
 Signature:
 
 ```sql
-read_gtf(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, attributes_map := FALSE, attributes_list := FALSE, attributes_pairs := FALSE, region := NULL, index_path := NULL, scan_mode := 'auto')
+read_gtf(path, header_names := NULL, header := FALSE, column_types := NULL, auto_detect := FALSE, attributes_map := FALSE, attributes_list := FALSE, attributes_pairs := FALSE, attributes := []::VARCHAR[], region := NULL, index_path := NULL, scan_mode := 'auto')
 ```
 
 Returns:
@@ -2037,6 +2463,18 @@ Returns:
 ```
 table
 ```
+
+### Map keys
+
+attributes_map leaves out an attribute whose key is not valid UTF-8, since a MAP key cannot be NULL; a value that is not valid UTF-8 is NULL.
+
+### Missing keys
+
+A requested key absent from every feature yields NULL on every row, exactly as attributes_map[key] does. GTF declares no attribute vocabulary, so binding does not scan the file to validate key presence; that would require a full extra pass. Assert presence with an aggregate, for example: SELECT CASE WHEN count(gene_id) > 0 THEN true ELSE error('gene_id is all NULL') END FROM read_gtf('annotations.gtf', attributes := ['gene_id']);
+
+### Attributes
+
+attributes := ['gene_id', 'transcript_id'] appends VARCHAR columns named for the requested keys. Each value equals attributes_map[key], including NULL for absent keys; repeated keys use the first value. Key lookup is case-sensitive: attributes := ['Gene_ID'] on a file that uses gene_id returns a column of NULLs. Keys must be nonempty and distinct from fixed and optional attribute column names; because column names ignore case, two keys that differ only in case are rejected. Only projected keys are parsed during scanning.
 
 ### Scanning
 
@@ -2046,6 +2484,86 @@ Comma-separated indexed regions emit each row once across overlaps. scan_mode='s
 
 ```sql
 SELECT seqname, feature, start, "end" FROM read_gtf('annotations.gtf.gz') LIMIT 5;
+```
+
+## read_genbank
+
+Read GenBank flat-file features in read_gff's column shape, with optional parsed qualifier MAP.
+
+Signature:
+
+```sql
+read_genbank(path, attributes_map := FALSE, attributes := []::VARCHAR[])
+```
+
+Returns:
+
+```
+table
+```
+
+### Map keys
+
+attributes_map leaves out a qualifier whose key is not valid UTF-8, since a MAP key cannot be NULL; a value that is not valid UTF-8 is NULL.
+
+### Mapping
+
+seqname is VERSION, else ACCESSION, else the LOCUS name; a segment on a remote accession (ACC.1:5..40) is reported under that accession. source is 'GenBank'. join()/order() give one row per segment in biological order, complement(...) sets strand '-', and the GFF3 phase of each CDS segment is carried from /codon_start across segments (absent means 1). A span whose end precedes its start on a circular record wraps the origin into two segments, and a between site n^m is the zero-length site at n. The record-level source feature is dropped, and /translation is omitted as redundant with ORIGIN.
+
+### Attributes
+
+Synthesized GFF3 keys ID, Name and Parent accompany the original qualifiers. ID is gene-<locus_tag> for genes and <key>-<n> otherwise, with n the feature's 0-based position in the file. Parent links a feature to the gene sharing its /locus_tag (or /gene) anywhere in the record. Repeated qualifiers become one key with comma-joined values, valueless qualifiers read 'true', and ; = & , % are percent-encoded. attributes_map := TRUE adds the same pairs as a MAP.
+
+### Missing keys
+
+A requested key absent from every feature yields NULL on every row, exactly as attributes_map[key] does. GenBank declares no qualifier vocabulary, so binding does not scan the file to validate key presence; that would require a full extra pass. Assert presence with an aggregate, for example: SELECT CASE WHEN count(product) > 0 THEN true ELSE error('product is all NULL') END FROM read_genbank('phix174.gb', attributes := ['product']);
+
+### Named attributes
+
+attributes := ['gene', 'product'] appends VARCHAR columns named for the requested keys, after attributes_map when that is requested. Each value equals attributes_map[key] byte for byte: repeated qualifiers are comma-joined, a valueless qualifier reads 'true', values stay percent-encoded, the synthesized ID, Name and Parent are addressable, and an absent key is NULL. Key lookup is case-sensitive, like qualifier keys themselves: attributes := ['ec_number'] on features that carry /EC_number returns a column of NULLs. Keys must be nonempty and distinct from the fixed columns and attributes_map when it is requested; because column names ignore case, two keys that differ only in case are rejected. Only projected keys are computed during scanning.
+
+### Errors
+
+Records stream one at a time, so memory follows the largest record. A record without a terminating //, a FEATURES table with no sequence section, a malformed location, an unsupported location form (one-of, gap, bond, nested join/order, a.b), an origin-spanning span on a linear record, or a /codon_start outside 1..3 is an error naming the feature and line. Table layout and these rules follow BioPython's GenBank scanner, and test/scripts/genbank_oracle_test.py diffs the reader against it.
+
+### Examples
+
+```sql
+SELECT seqname, feature, start, "end" FROM read_genbank('phix174.gb') LIMIT 5;
+```
+
+```sql
+SELECT feature, locus_tag, product FROM read_genbank('phix174.gb', attributes := ['locus_tag', 'product']) WHERE feature = 'CDS';
+```
+
+## genbank_to_fasta
+
+Write the ORIGIN sequence of each GenBank record as FASTA and return success, output_path and records_written.
+
+Signature:
+
+```sql
+genbank_to_fasta(path, output_path := NULL, line_width := 70, overwrite := FALSE)
+```
+
+Returns:
+
+```
+table
+```
+
+### Naming
+
+Records are written under the same name read_genbank reports as seqname, so feature coordinates land on the contig of that name; the DEFINITION follows without its trailing period, as in NCBI's FASTA export. A segment on a remote accession is not written.
+
+### Output
+
+output_path defaults to path with .fa appended. The FASTA is written to a temporary file beside output_path and renamed into place only after the input has been read to a clean end, so a failure never leaves a partial output and an existing file is never lost; with overwrite := FALSE an existing output is an error. Records without an ORIGIN block are skipped; zero written records is an error. line_width must be at least 1.
+
+### Examples
+
+```sql
+SELECT * FROM genbank_to_fasta('phix174.gb', output_path := 'phix174.fa');
 ```
 
 ## read_tabix
@@ -2206,6 +2724,140 @@ table
 SELECT * FROM tabix_index('gff_file.gff.gz', preset := 'gff');
 ```
 
+## duckhts_bam_insert_size_counts_sql
+
+Compose projected BAM/CRAM reads, flag predicates and packed-CIGAR lengths into riker 0.4.1 insert-size counts.
+
+Signature:
+
+```sql
+duckhts_bam_insert_size_counts_sql(path, reference := NULL, include_duplicates := FALSE, decompression_threads := 0, scan_mode := 'auto', index_path := NULL)
+```
+
+Returns:
+
+```
+table(pair_orientation VARCHAR, insert_size BIGINT, read_pairs UBIGINT)
+```
+
+### Authority and attribution
+
+Fulcrum Genomics riker 0.4.1 (MIT), tag 40d5e3260c5b1b9d210c28f7c90a75387013b4ce, is the oracle. Its executable rules supersede the design note's draft rules; Picard is context only.
+
+### Selection
+
+riker src/commands/isize.rs:197-218: paired, read and mate mapped, primary (not secondary or supplementary), not first-segment or QC-fail, nonzero TLEN, same reference, and no duplicate flag unless include_duplicates is true. No MAPQ, proper-pair or QNAME predicate; a second-segment flag is not required. Absolute signed-32-bit TLEN includes INT32_MIN as 2147483648.
+
+### Orientation
+
+riker src/sam/pair_orientation.rs:30-59: equal strands are TANDEM. For reverse reads compare mate alignment start with inclusive CIGAR reference end; for forward reads compare POS with POS + TLEN (no minus one). Strictly earlier forward end is FR; equality is RF. Missing CIGAR spans one reference base (noodles alignment_end, called at :49).
+
+### Execution
+
+Unordered sparse rows; absent bins are omitted. read_bam projects only FLAG, RNAME, RNEXT, POS, PNEXT, TLEN and binary CIGAR. DuckDB's threads setting controls SQL processing; scan_mode is auto or sequential as in read_bam. decompression_threads controls htslib workers per handle. No SEQ/QUAL/tags/QNAME columns are emitted, but CRAM CIGAR projection currently requests SEQ/QUAL and AUX internally for long-CIGAR CG restoration (src/bam_reader.c bam_cram_required_fields).
+
+### Alternative and benchmark
+
+duckhts_bam_insert_size_counts implements the same counts with native per-worker sparse histograms. benchmarks/benchmark_insert_size_counts.md records both arms against riker; native takes the unsuffixed name by measurement. SQL misses every declared 1x target on that workload. Both arms remain public.
+
+### Examples
+
+```sql
+CREATE TABLE insert_counts AS SELECT * FROM duckhts_bam_insert_size_counts_sql('sample.bam');
+```
+
+```sql
+SELECT * FROM duckhts_insert_size_metrics('insert_counts', sample_name := 'S1');
+```
+
+## duckhts_bam_insert_size_counts
+
+Reduce BAM/CRAM records to sparse insert-size counts using a native riker 0.4.1 kernel.
+
+Signature:
+
+```sql
+duckhts_bam_insert_size_counts(path, reference := NULL, include_duplicates := FALSE, threads := 1, decompression_threads := 0, scan_mode := 'auto', index_path := NULL, reference_index_path := NULL)
+```
+
+Returns:
+
+```
+table(pair_orientation VARCHAR, insert_size BIGINT, read_pairs UBIGINT)
+```
+
+### Authority and attribution
+
+Fulcrum Genomics riker 0.4.1 (MIT), tag 40d5e3260c5b1b9d210c28f7c90a75387013b4ce, is the executable oracle. Its rules supersede the design note's draft first-segment, QC-fail, POS + TLEN - 1 and mixed-case orientation rules. Picard InsertSizeMetricsCollector is context only, not the oracle.
+
+### Selection
+
+riker src/commands/isize.rs:197-206: paired, read and mate mapped, primary (not secondary or supplementary), not first-segment or QC-fail, nonzero TLEN, and no duplicate flag unless include_duplicates is true. Neither MAPQ (including 0 and 255) nor proper-pair status is a predicate. Rejecting first segments does not require a second-segment flag. No QNAME matching is performed.
+
+### Orientation and size
+
+riker src/sam/pair_orientation.rs:30-59: require the same reference; equal strands are TANDEM. For a reverse read compare mate alignment start with inclusive CIGAR reference end; for a forward read compare alignment start with alignment start + TLEN (no minus one). Forward end strictly before reverse end is FR; equality is RF. Missing CIGAR spans one reference base, as in noodles alignment_end (riker src/sam/pair_orientation.rs:49). riker src/commands/isize.rs:211-218 counts unsigned absolute TLEN, including INT32_MIN as 2147483648.
+
+### Execution and limits
+
+Unordered sparse rows; absent bins are omitted. Indexed scans use per-worker file handles and histograms (threads 1..8), with one-million-base task windows and read-start ownership so overlapping reads count once. auto falls back to a single sequential worker if no index exists; indexed requires an index; sequential streams the file explicitly. SEQ, QUAL and tags are not decoded. decompression_threads is htslib workers per handle, independent of histogram workers. Each worker and the merged result are capped at one million distinct orientation/size bins; exceeding the cap is an error. Counts are checked for UBIGINT overflow. The reduction runs during table-function initialization; the stable C API offers no interrupt polling inside that scan. On wasm use threads=1 and decompression_threads=0.
+
+### Scope
+
+Counts are over the whole file, not grouped by read group or sample. reference supplies the FASTA for CRAM. Sample labels and provenance belong in SQL; no riker text files or plots are written. SAM TLEN is a signed 32-bit value.
+
+### Alternative and benchmark
+
+duckhts_bam_insert_size_counts_sql composes projected read_bam, flag predicates and packed-CIGAR lengths in SQL. benchmarks/benchmark_insert_size_counts.md records both arms against riker; native takes the unsuffixed name by measurement. Native BAM misses the declared 1x targets at 1, 4 and 8 threads; native CRAM meets all four. Both arms remain public and face the same targets.
+
+### Examples
+
+```sql
+CREATE TABLE insert_counts AS SELECT * FROM duckhts_bam_insert_size_counts('sample.bam');
+```
+
+```sql
+SELECT * FROM duckhts_insert_size_metrics('insert_counts', sample_name := 'S1');
+```
+
+## duckhts_insert_size_metrics
+
+Compute riker 0.4.1 weighted insert-size metrics from a named sparse counts relation.
+
+Signature:
+
+```sql
+duckhts_insert_size_metrics(counts_table, deviations := 10.0, min_frac := 0.05, sample_name := NULL)
+```
+
+Returns:
+
+```
+table(sample VARCHAR, pair_orientation VARCHAR, read_pairs HUGEINT, median_insert_size DOUBLE, median_absolute_deviation DOUBLE, mean_insert_size DOUBLE, standard_deviation DOUBLE, mode_insert_size BIGINT, min_insert_size BIGINT, max_insert_size BIGINT, histogram_cutoff BIGINT)
+```
+
+### Authority and attribution
+
+Fulcrum Genomics riker 0.4.1 (MIT), tag 40d5e326, is the oracle; Picard is context only. The executable rules supersede the design note's draft rules (see duckhts_bam_insert_size_counts).
+
+### Input
+
+counts_table names a table or view with pair_orientation (FR, RF, TANDEM), insert_size (whole 1..UINT32_MAX) and positive whole read_pairs. Duplicate orientation/size rows are summed. Empty input returns no rows. deviations and min_frac must be finite and nonnegative. min_frac greater than 1 yields no metric rows, as in riker; sample_name is caller supplied, not inferred from tags.
+
+### Weighted statistics
+
+riker src/counter.rs:110-115 selects the largest mode on ties; :180-210 interpolates the two middle observations for even totals; :226-240 stores doubled absolute deviations as rounded, saturating u32 keys and halves their median. src/commands/isize.rs:245-277 retains orientations whose count is at least total * min_frac; original counts, median, MAD and min/max use every size. Only mean and population standard deviation trim to sizes <= median + deviations * MAD (src/counter.rs:154-175). No read-pair expansion is used; intermediates scale with distinct bins. Values are numeric; printf('%.2f', value) reproduces riker's two-decimal serialization (src/commands/isize.rs:328-340).
+
+### Histogram cutoff
+
+riker src/commands/isize.rs:236-290 uses the floor of the largest median + deviations * MAD among retained orientations. histogram_cutoff repeats that shared value, clamped to UINT32_MAX because larger cutoffs admit the same supported insert sizes. To reproduce the histogram, pivot all orientations' counts at sizes <= this cutoff, not just retained orientations, filling missing counts with zero. If no orientation passes min_frac, riker emits the entire raw histogram; use the counts relation without trimming. Empty input has neither metrics nor histogram rows.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_insert_size_metrics('insert_counts', deviations := 10, min_frac := 0.05, sample_name := 'S1');
+```
+
 ## bam_bin_counts
 
 Count BAM or CRAM read starts into fixed-width bins. Returns one row per bin across the selected contig span, including zero-count bins, with total, forward, and reverse counts; `rmdup := 'streaming'` applies the WisecondorX-style larp/larp2 consecutive-position deduplication, `rmdup := 'flag'` drops SAM duplicate-flagged reads, and `stats := 'gc'`, `'mq'`, or `'gc,mq'` adds per-bin pre/post-filter GC and MAPQ sufficient statistics, including reference GC when `reference` is provided.
@@ -2213,7 +2865,7 @@ Count BAM or CRAM read starts into fixed-width bins. Returns one row per bin acr
 Signature:
 
 ```sql
-bam_bin_counts(path, bin_width, chrom := NULL, reference := NULL, index_path := NULL, mapq := 0, require_flags := 0, exclude_flags := 0, rmdup := 'none', stats := NULL)
+bam_bin_counts(path, bin_width, chrom := NULL, include_unmapped := FALSE, reference := NULL, index_path := NULL, mapq := 0, require_flags := 0, exclude_flags := 0, rmdup := 'none', stats := NULL)
 ```
 
 Returns:
@@ -2222,10 +2874,420 @@ Returns:
 table
 ```
 
+### Unmapped records
+
+include_unmapped := TRUE appends one synthetic row with chrom = '*' for no-coordinate records, even when no such records are present; start, end and bin_id are NULL. The default FALSE omits this row. SAM-flag filters, MAPQ filtering and flag-based duplicate removal apply to these records; streaming duplicate removal is not applied to them. Reference-GC fields are NULL for this row.
+
 ### Examples
 
 ```sql
 SELECT * FROM bam_bin_counts('fixture_mixed.cram', 5000, reference := 'fixture_ref.fa', rmdup := 'streaming', stats := 'gc,mq');
+```
+
+## duckhts_depth_bins
+
+Correct read counts in fixed bins for GC content with a median read rate per GC stratum, giving each bin an expected count, a depth ratio and whether it is kept.
+
+Signature:
+
+```sql
+duckhts_depth_bins(bins_table, min_mappability := 0.9, gc_step := 0.01, min_stratum_bins := 10, outlier_quantile := 0.01, max_ratio := 4.0)
+```
+
+Returns:
+
+```
+table(sample_id VARCHAR, chrom VARCHAR, start BIGINT, "end" BIGINT, reads BIGINT, gc DOUBLE, mappability DOUBLE, gc_stratum INTEGER, stratum_bins BIGINT, expected DOUBLE, ratio DOUBLE, log2_ratio DOUBLE, reason VARCHAR, kept BOOLEAN, method VARCHAR)
+```
+
+### Input
+
+bins_table is a caller-named table or view with one row per sample and bin: sample_id, chrom, start and end (zero-based, half-open), reads (a whole number of reads, for example count_total of bam_bin_counts) and gc, the G+C share of the A, C, G and T reference bases of the bin from 0 to 1 (for example (num_c + num_g) / (num_a + num_c + num_g + num_t) of fasta_nuc). An optional mappability column from 0 to 1 is used when present. A NULL sample_id or chrom, start < 0 or end <= start, negative or fractional reads, and gc or mappability outside [0, 1] are errors. Restrict contigs (for example to the primary assembly) and remove known problem bins (gaps, centromeres, bins with many N bases, the pseudo-autosomal regions of X where that matters) in SQL first.
+
+### Model
+
+A bin's read rate is reads / (end - start). Its GC stratum is floor(gc / gc_step). The training bins of a sample are its autosomal bins that pass the bin rules, have at least one read and a read rate inside the outlier_quantile and 1 - outlier_quantile quantiles of those bins' rates. expected is the bin's length times the median rate of the training bins of its sample and stratum, scaled so that the median ratio of the sample's kept positive-read autosomal bins is 1. Empty bins do not set this scale and retain zero ratios when their bin and stratum rules pass. ratio = reads / expected is then about 1 for two copies, 0.5 for one and 1.5 for three; log2_ratio is NULL for a bin without reads. Autosomal means a contig whose duckhts_contig_key is not X, Y or MT. The strata are fitted on the sample's own autosomal bins, so a change that holds a large share of the training bins of some GC strata is partly absorbed by the correction: correct a whole genome rather than a few chromosomes (on five chromosomes, a planted chr18 gain was recovered at 0.6 to 0.7 of its size; benchmarks/benchmark_depth_fraction.md), or give the estimators expected counts from a reference panel instead.
+
+### Kept bins
+
+kept is true when reason is NULL. reason names the first rule a bin fails: no_reads (NULL reads), no_gc, low_mappability (below min_mappability; only when mappability is given), sparse_stratum (fewer than min_stratum_bins training bins in the stratum), no_autosomal_bins (the sample has no autosomal bin to scale by) or high_ratio (ratio above max_ratio, typically collapsed repeats). Only high_ratio looks at a bin's count, so a bin with no reads, such as Y in a genome without Y, stays kept. mappability only filters; it is not a second correction.
+
+### Limits
+
+gc_step must be in [1/2147483647, 1], so floor(gc / gc_step) fits the INTEGER gc_stratum output even at gc = 1. The median and quantile aggregates hold one value per autosomal bin of each sample; the joins build on samples x GC strata and on samples; the input is materialized once and the output has one row per input row, in no particular order. Bins are not normalised against a reference set; the estimators take one.
+
+### Examples
+
+```sql
+SELECT * FROM duckhts_depth_bins('bins') WHERE kept LIMIT 5;
+```
+
+```sql
+CREATE TABLE bins AS SELECT 'S1' AS sample_id, b.chrom, b.start, b."end", b.count_total AS reads, (n.num_c + n.num_g) / nullif(n.num_a + n.num_c + n.num_g + n.num_t, 0) AS gc FROM bam_bin_counts('sample.bam', 1000000) b JOIN fasta_nuc('reference.fa', bin_width := 1000000) n USING (chrom, start) WHERE n.num_n < 0.05 * n.seq_len;
+```
+
+## duckhts_depth_region_fraction
+
+Estimate the share of cells with a one-copy gain or loss of each named region from corrected bin depth, with an interval from the bins or from a reference set.
+
+Signature:
+
+```sql
+duckhts_depth_region_fraction(bins_table, regions_table)
+```
+
+Returns:
+
+```
+table(sample_id VARCHAR, region VARCHAR, bins BIGINT, baseline_bins BIGINT, ratio DOUBLE, shift DOUBLE, shift_se DOUBLE, shift_low DOUBLE, shift_high DOUBLE, dispersion DOUBLE, reference_shift DOUBLE, reference_samples BIGINT, status VARCHAR, method VARCHAR)
+```
+
+### Input
+
+duckhts_depth_region_fraction gives the interval from the bins; duckhts_depth_region_fraction_ref takes reference_table. bins_table holds corrected bins, such as the output of duckhts_depth_bins: sample_id, chrom, start, end, reads, expected and kept. Only kept bins are used; a kept bin needs reads >= 0 and a finite expected > 0. regions_table has region, chrom, start and end (zero-based, half-open); several rows with one region name form one region, and its overlapping or abutting intervals are merged. A bin belongs to a region when its midpoint lies in one of the region's intervals. A NULL kept counts as not kept. Contig names are compared byte for byte.
+
+### Estimator
+
+With C and E the sums of reads and expected over kept bins, ratio = (C_r / E_r) / (C_b / E_b), where r is the region and b the baseline: the sample's kept autosomal bins outside the region. shift = 2 * (ratio - 1) is the share of cells with a one-copy gain (positive) or loss (negative) of the region relative to two copies, if the baseline is unchanged. A one-copy change in every cell gives 1 or -1; the X of an XY genome gives -1. Other changes in the sample move the baseline and so every shift: a 150 Mb gain in 30% of cells moves the other regions by about -0.014.
+
+### Interval without a reference
+
+Bin counts are quasi-Poisson: the variance of a sum of counts is dispersion times that sum (at least one read), with dispersion the mean squared Pearson residual of the baseline bins, at least 1. shift_se follows by the delta method, treating bins as independent, and the interval is shift +- 1.959964 shift_se. Real libraries have correlated residual bias, so this interval is optimistic for large regions; a reference set measures that bias.
+
+### Reference set
+
+With reference_table, corrected bins of reference samples in the same layout, each reference sample's shift for the region is computed the same way, leaving out the tested sample when its sample_id is also in the reference. shift is the sample's shift minus the reference mean (reference_shift). Its variance is the sample's own bin variance, plus the variance of the reference shifts beyond their mean bin variance, plus the variance of the reference mean; the interval uses the 97.5% quantile of Student's t with reference_samples - 1 degrees of freedom. reference_samples counts the reference samples used.
+
+### Output
+
+One row per sample of bins_table and region. status is ok, no_bins (no kept bin in the region), no_baseline (fewer than two kept baseline bins or no baseline reads) or few_reference_samples (fewer than two; shift_se and the interval are NULL). method names the estimator and its version.
+
+### Limits
+
+The narrow input columns (sample, contig, coordinates, reads, expected, kept) are materialized once, in DuckDB's buffer manager; the per-sample sums and the bin-region join read that copy. The join matches each kept bin to the merged intervals of its contig and keeps the pairs whose interval holds the bin's midpoint; the state per sample and region is a few sums, and the output has one row per sample and region. Depth does not see copy-neutral changes, and a constitutional copy-number variant looks like a change in every cell.
+
+### SQL entry points
+
+duckhts_depth_region_fraction uses the base inputs. duckhts_depth_region_fraction_ref requires reference_table as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT sample_id, region, shift, shift_low, shift_high, status FROM duckhts_depth_region_fraction('corrected_bins', 'chromosomes');
+```
+
+## duckhts_depth_region_fraction_ref
+
+Estimate regional depth shifts and reference-calibrated uncertainty.
+
+Signature:
+
+```sql
+duckhts_depth_region_fraction_ref(bins_table, regions_table, reference_table)
+```
+
+Returns:
+
+```
+table(sample_id VARCHAR, region VARCHAR, bins BIGINT, baseline_bins BIGINT, ratio DOUBLE, shift DOUBLE, shift_se DOUBLE, shift_low DOUBLE, shift_high DOUBLE, dispersion DOUBLE, reference_shift DOUBLE, reference_samples BIGINT, status VARCHAR, method VARCHAR)
+```
+
+### Input
+
+duckhts_depth_region_fraction gives the interval from the bins; duckhts_depth_region_fraction_ref takes reference_table. bins_table holds corrected bins, such as the output of duckhts_depth_bins: sample_id, chrom, start, end, reads, expected and kept. Only kept bins are used; a kept bin needs reads >= 0 and a finite expected > 0. regions_table has region, chrom, start and end (zero-based, half-open); several rows with one region name form one region, and its overlapping or abutting intervals are merged. A bin belongs to a region when its midpoint lies in one of the region's intervals. A NULL kept counts as not kept. Contig names are compared byte for byte.
+
+### Estimator
+
+With C and E the sums of reads and expected over kept bins, ratio = (C_r / E_r) / (C_b / E_b), where r is the region and b the baseline: the sample's kept autosomal bins outside the region. shift = 2 * (ratio - 1) is the share of cells with a one-copy gain (positive) or loss (negative) of the region relative to two copies, if the baseline is unchanged. A one-copy change in every cell gives 1 or -1; the X of an XY genome gives -1. Other changes in the sample move the baseline and so every shift: a 150 Mb gain in 30% of cells moves the other regions by about -0.014.
+
+### Interval without a reference
+
+Bin counts are quasi-Poisson: the variance of a sum of counts is dispersion times that sum (at least one read), with dispersion the mean squared Pearson residual of the baseline bins, at least 1. shift_se follows by the delta method, treating bins as independent, and the interval is shift +- 1.959964 shift_se. Real libraries have correlated residual bias, so this interval is optimistic for large regions; a reference set measures that bias.
+
+### Reference set
+
+With reference_table, corrected bins of reference samples in the same layout, each reference sample's shift for the region is computed the same way, leaving out the tested sample when its sample_id is also in the reference. shift is the sample's shift minus the reference mean (reference_shift). Its variance is the sample's own bin variance, plus the variance of the reference shifts beyond their mean bin variance, plus the variance of the reference mean; the interval uses the 97.5% quantile of Student's t with reference_samples - 1 degrees of freedom. reference_samples counts the reference samples used.
+
+### Output
+
+One row per sample of bins_table and region. status is ok, no_bins (no kept bin in the region), no_baseline (fewer than two kept baseline bins or no baseline reads) or few_reference_samples (fewer than two; shift_se and the interval are NULL). method names the estimator and its version.
+
+### Limits
+
+The narrow input columns (sample, contig, coordinates, reads, expected, kept) are materialized once, in DuckDB's buffer manager; the per-sample sums and the bin-region join read that copy. The join matches each kept bin to the merged intervals of its contig and keeps the pairs whose interval holds the bin's midpoint; the state per sample and region is a few sums, and the output has one row per sample and region. Depth does not see copy-neutral changes, and a constitutional copy-number variant looks like a change in every cell.
+
+### SQL entry points
+
+duckhts_depth_region_fraction uses the base inputs. duckhts_depth_region_fraction_ref requires reference_table as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT sample_id, region, shift, shift_low, shift_high, reference_samples FROM duckhts_depth_region_fraction_ref('corrected_bins', 'chromosomes', 'reference_bins');
+```
+
+## duckhts_depth_sex_fraction
+
+Estimate the share of a second genome of the other sex from the depth of X and Y relative to the autosomes.
+
+Signature:
+
+```sql
+duckhts_depth_sex_fraction(bins_table)
+```
+
+Returns:
+
+```
+table(sample_id VARCHAR, autosomal_bins BIGINT, x_bins BIGINT, y_bins BIGINT, dispersion DOUBLE, x_copies DOUBLE, x_copies_se DOUBLE, y_copies DOUBLE, y_copies_se DOUBLE, major_sex VARCHAR, fraction_x DOUBLE, fraction_x_se DOUBLE, fraction_y DOUBLE, fraction_y_se DOUBLE, fraction DOUBLE, fraction_se DOUBLE, fraction_low DOUBLE, fraction_high DOUBLE, agreement_z DOUBLE, reference_samples BIGINT, status VARCHAR, method VARCHAR)
+```
+
+### Input
+
+duckhts_depth_sex_fraction uses the ideal copy levels; duckhts_depth_sex_fraction_ref takes reference_table. bins_table holds corrected bins as for duckhts_depth_region_fraction. X, Y and MT are the contigs whose duckhts_contig_key is X, Y or MT; every other contig is autosomal. Remove the pseudo-autosomal regions of X, and any Y bins that are not single-copy in an XY genome, in SQL first: they are not one X or one Y copy. A NULL kept counts as not kept; a NULL chrom is an error.
+
+### Model
+
+x_copies and y_copies are twice the depth ratio of the kept X or Y bins to the kept autosomal bins (sums of reads over sums of expected), after the calibration below. The sample is a major genome and a second genome of the other sex with a DNA share f below 0.5. The major genome is XX when x_copies >= 1.5 (by y_copies < 0.5 without X bins). For an XX major genome x_copies = 2 - f and y_copies = f; for an XY one x_copies = 1 + f and y_copies = 1 - f. fraction_x and fraction_y are the two estimates, unclipped, so a value below 0 means no second genome is seen. fraction combines them by inverse variance; agreement_z = (fraction_x - fraction_y) / sqrt(fraction_x_se^2 + fraction_y_se^2). An X or Y copy change of the major genome, such as loss of Y in part of the cells or an X aneuploidy, moves the two estimates differently.
+
+### Calibration
+
+Without a reference, one X copy is 1, two are 2, one Y copy is 1 and the Y of a genome without Y is 0. With reference_table, corrected bins of reference samples with a sex column (XX or XY, one value per sample), the XY references set the depth of one X copy and one Y copy, and the XX references, when there are any, set two X copies and the Y background of a genome without Y; without XX references two X copies are twice one and the background is 0. The tested sample is left out of its own reference. Mismapped reads give an XX genome some Y depth, which without XX references biases fraction_y upward, and because its standard error comes from a few reads, also fraction.
+
+### Errors and intervals
+
+Standard errors use the quasi-Poisson bin model of duckhts_depth_region_fraction with the dispersion of the autosomal bins; the calibration levels are treated as known. The interval is fraction +- 1.959964 fraction_se.
+
+### Output
+
+One row per sample of bins_table. status is ok, no_autosomal_bins, no_xy_reference (a reference without XY samples), bad_reference (levels that do not separate one copy from two or from none), no_sex_bins, no_x_bins or no_y_bins (the other chromosome gives the estimate), or x_y_disagree (absolute agreement_z above 3). A reference sex other than XX or XY is an error. method names the estimator and its version.
+
+### Limits
+
+One pass over the input into a few sums per sample. The estimate is evidence of X and Y dosage, not a determination of sex.
+
+### SQL entry points
+
+duckhts_depth_sex_fraction uses the base inputs. duckhts_depth_sex_fraction_ref requires reference_table as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT sample_id, major_sex, fraction, fraction_low, fraction_high, status FROM duckhts_depth_sex_fraction('corrected_bins');
+```
+
+## duckhts_depth_sex_fraction_ref
+
+Estimate sex-copy mixture fractions using XX and XY reference bins.
+
+Signature:
+
+```sql
+duckhts_depth_sex_fraction_ref(bins_table, reference_table)
+```
+
+Returns:
+
+```
+table(sample_id VARCHAR, autosomal_bins BIGINT, x_bins BIGINT, y_bins BIGINT, dispersion DOUBLE, x_copies DOUBLE, x_copies_se DOUBLE, y_copies DOUBLE, y_copies_se DOUBLE, major_sex VARCHAR, fraction_x DOUBLE, fraction_x_se DOUBLE, fraction_y DOUBLE, fraction_y_se DOUBLE, fraction DOUBLE, fraction_se DOUBLE, fraction_low DOUBLE, fraction_high DOUBLE, agreement_z DOUBLE, reference_samples BIGINT, status VARCHAR, method VARCHAR)
+```
+
+### Input
+
+duckhts_depth_sex_fraction uses the ideal copy levels; duckhts_depth_sex_fraction_ref takes reference_table. bins_table holds corrected bins as for duckhts_depth_region_fraction. X, Y and MT are the contigs whose duckhts_contig_key is X, Y or MT; every other contig is autosomal. Remove the pseudo-autosomal regions of X, and any Y bins that are not single-copy in an XY genome, in SQL first: they are not one X or one Y copy. A NULL kept counts as not kept; a NULL chrom is an error.
+
+### Model
+
+x_copies and y_copies are twice the depth ratio of the kept X or Y bins to the kept autosomal bins (sums of reads over sums of expected), after the calibration below. The sample is a major genome and a second genome of the other sex with a DNA share f below 0.5. The major genome is XX when x_copies >= 1.5 (by y_copies < 0.5 without X bins). For an XX major genome x_copies = 2 - f and y_copies = f; for an XY one x_copies = 1 + f and y_copies = 1 - f. fraction_x and fraction_y are the two estimates, unclipped, so a value below 0 means no second genome is seen. fraction combines them by inverse variance; agreement_z = (fraction_x - fraction_y) / sqrt(fraction_x_se^2 + fraction_y_se^2). An X or Y copy change of the major genome, such as loss of Y in part of the cells or an X aneuploidy, moves the two estimates differently.
+
+### Calibration
+
+Without a reference, one X copy is 1, two are 2, one Y copy is 1 and the Y of a genome without Y is 0. With reference_table, corrected bins of reference samples with a sex column (XX or XY, one value per sample), the XY references set the depth of one X copy and one Y copy, and the XX references, when there are any, set two X copies and the Y background of a genome without Y; without XX references two X copies are twice one and the background is 0. The tested sample is left out of its own reference. Mismapped reads give an XX genome some Y depth, which without XX references biases fraction_y upward, and because its standard error comes from a few reads, also fraction.
+
+### Errors and intervals
+
+Standard errors use the quasi-Poisson bin model of duckhts_depth_region_fraction with the dispersion of the autosomal bins; the calibration levels are treated as known. The interval is fraction +- 1.959964 fraction_se.
+
+### Output
+
+One row per sample of bins_table. status is ok, no_autosomal_bins, no_xy_reference (a reference without XY samples), bad_reference (levels that do not separate one copy from two or from none), no_sex_bins, no_x_bins or no_y_bins (the other chromosome gives the estimate), or x_y_disagree (absolute agreement_z above 3). A reference sex other than XX or XY is an error. method names the estimator and its version.
+
+### Limits
+
+One pass over the input into a few sums per sample. The estimate is evidence of X and Y dosage, not a determination of sex.
+
+### SQL entry points
+
+duckhts_depth_sex_fraction uses the base inputs. duckhts_depth_sex_fraction_ref requires reference_table as an additional positional argument.
+
+### Examples
+
+```sql
+SELECT sample_id, major_sex, fraction, fraction_low, fraction_high, status FROM duckhts_depth_sex_fraction_ref('corrected_bins', 'reference_bins_with_sex');
+```
+
+## duckhts_depth_state_solutions
+
+Fit the ichorCNA copy-number state model to corrected bins: tumour fraction, ploidy and rank of every start.
+
+Signature:
+
+```sql
+duckhts_depth_state_solutions(bins_table, normal_fractions := [0.5, 0.6, 0.7, 0.8, 0.9], ploidies := [2.0, 3.0], max_cn := 7, txn_e := 0.9999999, txn_strength := 10000000.0, max_iter := 20, min_segment_bins := 50, alt_fraction_threshold := 0.05, close_margin := 10.0, max_bins := 1000000)
+```
+
+Returns:
+
+```
+table(sample_id VARCHAR, solution INTEGER, start_normal DOUBLE, start_ploidy DOUBLE, normal_fraction DOUBLE, tumour_fraction DOUBLE, ploidy DOUBLE, log_likelihood DOUBLE, altered_fraction DOUBLE, iterations INTEGER, status VARCHAR, segments BIGINT, bins BIGINT, upstream VARCHAR, method VARCHAR)
+```
+
+### Input
+
+bins_table holds corrected bins with sample_id, chrom, start, end, log2_ratio and kept, as duckhts_depth_bins returns them. Only kept bins take part; a kept bin whose log2_ratio is NULL takes every state with likelihood 1, as upstream carries a bin without a ratio. Bins are ordered by chrom then start within a sample. The model learns from the autosomal bins (duckhts_contig_key not X, Y or MT) and decodes every bin. Restrict contigs and remove problem bins in SQL first.
+
+### Model
+
+A port of ichorCNA v0.6.1 (GavinHaLab/ichorCNA, Adalsteinsson, Ha, Freeman et al. 2017) for one sample with clonal states of copy number 1 to max_cn and the Student's t emission (nu 2.1) on the natural-log ratio, whose state means are log(((1 - n) c + 2 n) / ((1 - n) phi + 2 n)) for normal fraction n and ploidy phi. Expectation maximisation with the upstream priors (Beta(1, 1) on n, Gamma(4, 0.75) on phi, Gamma(2, beta_k) on each state precision, Dirichlet(200, 800 for two copies) on the initial distribution and Dirichlet(A * txn_strength) on the transitions) runs from each start of ploidies x normal_fractions for at most max_iter iterations until the objective changes by less than 1e-4 relative; a normal start of 0.95 runs only at ploidy 2, as upstream. The forward-backward and Viterbi passes follow HMMcopy 1.54.0. Upstream maximises each parameter with L-BFGS-B; this port climbs each one-dimensional objective from the same start, so values can differ in the last digits.
+
+### Guard and ranking
+
+Solutions are ranked by their objective, the data log-likelihood plus log prior. Upstream's guard sets normal_fraction to 1 (status guard_zero) when the longest altered training segment has at most min_segment_bins bins and at most alt_fraction_threshold of the training bins are altered. A lower-ranked solution whose objective is within close_margin of the best is close_to_best (a DuckHTS addition); the rest are ok. tumour_fraction is 1 - normal_fraction.
+
+### Output
+
+One row per sample and start with the solution columns, the number of its segments and bins, upstream ('ichorCNA v0.6.1') and method ('duckhts_depth_state v1'). altered_fraction is the share of training bins whose Viterbi state is not two copies. iterations counts the EM iterations whose parameters the solution reports.
+
+### Limits
+
+One decode per sample and macro call, on one thread per sample. The model holds about max_cn * 28 + 40 bytes per bin and one 48-byte record per segment and start; max_bins bounds the bins of a sample and the start grid has at most 100 points. A sample without copy-number change gives no fraction: the guard sets it to zero, or the fit converges to a normal fraction near 1, where the state means lie within the noise of each other and whole chromosomes can take any state, as in upstream; the copy numbers of such a solution are not evidence, its fraction is. Fraction and ploidy trade against each other, so every start is returned, and a genome with one altered region does not identify the fraction: a one-copy gain in a share m of cells and a two-copy gain in m/2 give the same ratio, and the prior decides between them, as in upstream; changes of more than one magnitude identify the fraction. Depth does not see copy-neutral changes, and a constitutional copy-number variant looks like a change in every cell. Parallelism across samples depends on how DuckDB spreads the per-sample rows over threads. Kept upstream quirks are listed in design/depth_fraction_lane.md.
+
+### Validation
+
+test/sql/depth_state_model.test and the R tests recover a planted normal fraction of 0.7 within 0.05, ploidy 2 within 0.15, whole-chromosome and arm-level changes over at least 95% and 90% of their bins, and the guard on an unchanged genome. benchmarks/benchmark_depth_state_model.md runs the unmodified upstream code on the same corrected bins of 16 real low-pass composites: where both land on the same optimum they agree to four decimals with every bin in the same state; on flat objectives (no change, one small event) the two optimizers reach different local maxima; latency is linear in bins.
+
+### Examples
+
+```sql
+SELECT sample_id, tumour_fraction, ploidy, altered_fraction, status FROM duckhts_depth_state_solutions('corrected_bins') WHERE solution = 1;
+```
+
+## duckhts_depth_state_segments
+
+Viterbi copy-number segments of every solution of the ichorCNA state model over corrected bins.
+
+Signature:
+
+```sql
+duckhts_depth_state_segments(bins_table, normal_fractions := [0.5, 0.6, 0.7, 0.8, 0.9], ploidies := [2.0, 3.0], max_cn := 7, txn_e := 0.9999999, txn_strength := 10000000.0, max_iter := 20, min_segment_bins := 50, alt_fraction_threshold := 0.05, close_margin := 10.0, max_bins := 1000000)
+```
+
+Returns:
+
+```
+table(sample_id VARCHAR, solution INTEGER, start_normal DOUBLE, start_ploidy DOUBLE, normal_fraction DOUBLE, tumour_fraction DOUBLE, ploidy DOUBLE, log_likelihood DOUBLE, altered_fraction DOUBLE, iterations INTEGER, status VARCHAR, chrom VARCHAR, start BIGINT, end BIGINT, bins INTEGER, state INTEGER, copy_number INTEGER, median_log2_ratio DOUBLE, upstream VARCHAR, method VARCHAR)
+```
+
+### Input
+
+The same relation and options as duckhts_depth_state_solutions; the two macros share one decode per call.
+
+### Output
+
+One row per sample, solution and segment: the solution columns of duckhts_depth_state_solutions, then chrom, start and end (the first bin's start and the last bin's end), bins, state (the copy number of the Viterbi state), copy_number (the state after upstream's integer correction, which re-reads segments at the highest state or with a median implying at least 1.2 max_cn copies from their median and the fitted purity and ploidy when the purity is at least 0.05), median_log2_ratio (the median of the segment's non-NULL ratios), upstream and method. A segment never crosses a contig.
+
+### Limits
+
+As duckhts_depth_state_solutions. Segment order is unspecified; order by sample_id, solution, chrom and start when it matters.
+
+### Examples
+
+```sql
+SELECT chrom, start, "end", bins, copy_number, median_log2_ratio FROM duckhts_depth_state_segments('corrected_bins') WHERE sample_id = 'S1' AND solution = 1 AND copy_number <> 2 ORDER BY chrom, start;
+```
+
+## duckhts_bam_mismatch_counts
+
+Count aligned read bases against the reference by mate, cycle, base quality and substitution, optionally leaving out masked positions such as known variants.
+
+Signature:
+
+```sql
+duckhts_bam_mismatch_counts(path, reference, region := NULL, mask := NULL, index_path := NULL, reference_index_path := NULL, mask_index_path := NULL, min_mapq := 20, require_flags := 0, exclude_flags := 3844, indel_flank := 5)
+```
+
+Returns:
+
+```
+table
+```
+
+### Input
+
+path is a SAM, BAM or CRAM file and reference is its indexed FASTA; fasta_index() builds the index. region is a comma-separated list of contigs or intervals and needs an alignment index; without it the whole file is read. Alignments are kept when MAPQ is at least min_mapq, every bit of require_flags is set and no bit of exclude_flags is set; the default 3844 leaves out unmapped, secondary, failed, duplicate and supplementary alignments.
+
+### Output
+
+One row for each combination that occurs: mate (1 or 2 for a paired read, 0 otherwise), cycle (the one-based position of the base in the read as sequenced, hard clips included), base_quality (NULL when the read stores no qualities), reference_base and read_base (both on the strand of the read, so a reverse alignment is complemented), and bases, the number of aligned bases. Rows with reference_base equal to read_base are the matches, so a rate is a ratio of two sums. Rows come in the order of mate, cycle, base_quality, reference_base, read_base.
+
+### What is counted
+
+Every aligned base (CIGAR M, = or X) of a kept alignment whose read base and reference base are both A, C, G or T. A read base written as = (the SAM sign for the reference base) is the reference base. A base within indel_flank read bases of an insertion, a deletion, a reference skip or a soft clip is left out, because bases next to a gap are often misaligned. A region selects alignments by overlap; all aligned bases of a selected alignment are counted, also those outside the region.
+
+### Mask
+
+mask is an indexed BCF or a bgzip-compressed VCF with a tabix index, for example known variants. Every reference position of a mask record is left out. A record with an indel or a symbolic allele also leaves out indel_flank bases on each side. The span of a record is the one htslib gives it, the same for a BCF and a VCF mask: the longest of REF, INFO/END, INFO/SVLEN of a deletion, duplication or copy-number allele, and FORMAT/LEN of a reference block. A VCF mask line is parsed up to INFO unless its FORMAT names LEN, so the genotypes of a population VCF are not parsed; each line is still decompressed and read whole into one buffer. The mask removes the variants it holds and no others: a variant of the sample that the mask does not hold, such as a private, de novo or somatic variant or an allele of a second genome, is still counted as a mismatch. So with a mask of known variants the mismatches that remain are mostly errors of the read, the library or the alignment, and their rate is an upper bound on the error rate; it is the error rate only when the mask holds every variant site of the genomes in the sample.
+
+### Contig names
+
+The contig names of the alignment header, the reference and the mask are compared byte for byte. A contig with a kept alignment that the reference does not have is an error. So is a contig that the mask does not know, in its header or in its index: a silent miss would count known variants as errors.
+
+### Limits
+
+One worker. Memory does not grow with the alignments read: 36.5 MB of counters, one reference window of 1 MiB with its mask, the alignment in hand and the longest mask line read, plus htslib's state for the file. For CRAM that includes the reference of the slice being decoded; a slice over a sparse region can span many megabases. A cycle above 1000 is counted as 1000 and a base quality above 93 as 93. The window moves along an alignment that reaches past it, so no alignment needs more reference in memory; an alignment with a reference skip of more than 1 MiB fetches a window on each side of the skip, and many such alignments are slow. Alignments are expected in coordinate order; an unsorted file is counted correctly but fetches a reference window for each alignment.
+
+### Examples
+
+```sql
+SELECT base_quality, sum(bases) FILTER (WHERE reference_base != read_base) / sum(bases) AS mismatch_rate FROM duckhts_bam_mismatch_counts('sample.bam', 'reference.fa', region := 'chr20:10000000-12000000', mask := 'known_variants.vcf.gz') GROUP BY base_quality ORDER BY base_quality;
+```
+
+## duckhts_bam_mate_overlap_counts
+
+Count where read 1 and read 2 of one fragment agree and disagree at the positions both align to, by base quality and base, as an estimate of sequencing error.
+
+Signature:
+
+```sql
+duckhts_bam_mate_overlap_counts(path, region := NULL, index_path := NULL, reference := NULL, reference_index_path := NULL, min_mapq := 20, require_flags := 0, exclude_flags := 3844, max_pending := 1000000)
+```
+
+Returns:
+
+```
+table
+```
+
+### Input
+
+path is a paired-end SAM, BAM or CRAM file in coordinate order; alignments out of order are an error. region is a comma-separated list of contigs or intervals and needs an alignment index; without it the whole file is read. reference is an indexed FASTA; fasta_index() builds the index. It is required for CRAM. Its only other use is to resolve a read base stored as '='; without a reference such a base is left out. Alignments are kept when MAPQ is at least min_mapq, every bit of require_flags is set and no bit of exclude_flags is set; the default 3844 leaves out unmapped, secondary, failed, duplicate and supplementary alignments.
+
+### Output
+
+One row for each combination that occurs: read1_quality and read2_quality (the base qualities, NULL when the read stores no qualities), read1_base and read2_base (both on the forward strand of the reference, so a real allele gives equal bases), and positions, the number of shared positions. Read 1 is the mate with flag 0x40 and read 2 the mate with flag 0x80, whichever comes first. Rows with read1_base different from read2_base are the disagreements, so a rate is a ratio of two sums. Rows come in the order of read1_quality, read2_quality, read1_base, read2_base, with a missing quality last.
+
+### What is counted
+
+Each reference position where both mates of a pair have an aligned base (CIGAR M, = or X), once per pair. Both mates are kept primary alignments on the same contig, the pair flag (0x1) is set and the mate-unmapped flag (0x8) is not, each names the other's start, and one is read 1 and the other read 2. Soft-clipped and inserted bases are not counted, nor are deleted or skipped (CIGAR N) positions, and a position where either base is not A, C, G or T is left out. A real allele sits on the molecule and both mates show it; a sequencing error usually shows in one mate only. So the disagreement rate is about twice the instrument error rate, with no reference, mask or contamination model. Errors made before sequencing, in the library, by PCR or by DNA damage, show in both mates and are not seen. Only fragments shorter than the two reads overlap, so the count leans toward short fragments and read ends. A region selects alignments by overlap, and a pair counts only when both of its mates are selected.
+
+### Limits
+
+One worker. The counters are fixed at 1.2 MB, and a base quality above 93 is counted as 93. The first mate of a pair is held until its mate arrives, with its name, CIGAR, sequence and qualities: about 400 bytes plus 1.5 bytes per read base and 4 bytes per CIGAR operation. A held mate whose mate start the scan has passed without a match is dropped, and a change of contig drops every held mate. Mates are matched by read name. A record that has the name of a held mate but does not pair with it is left out, and the held mate stays held for its own mate. SAM gives one name to one template, so such a record occurs only in a malformed file. More than max_pending (1 to 100,000,000) mates held at once is an error that names the limit. Held entries are reused but kept until the scan ends, so held memory is at most max_pending times the size of the longest alignment held, and in practice follows the most mates held at once.
+
+### Examples
+
+```sql
+SELECT read1_quality, sum(positions) FILTER (WHERE read1_base != read2_base) / sum(positions) AS discordance FROM duckhts_bam_mate_overlap_counts('sample.bam', region := 'chr20:10000000-12000000') GROUP BY read1_quality ORDER BY read1_quality;
 ```
 
 ## duckhts_bam_bed_coverage
@@ -2322,6 +3384,10 @@ Returns:
 table
 ```
 
+### Map keys
+
+key_values leaves out a pair whose key is not valid UTF-8, since a MAP key cannot be NULL; a value that is not valid UTF-8 is NULL.
+
 ### Examples
 
 ```sql
@@ -2409,6 +3475,10 @@ Returns:
 ```
 UBIGINT
 ```
+
+### Chromosome code
+
+The chromosome part of a VariantKey is a code of the upstream format, not a contig key. A leading chr is removed in any letter case. An all-digit name becomes its number modulo 256, with no range check, so 257 shares the code of 1. X, Y, and M or MT, in any letter case, become 23, 24 and 25, so 25 and MT share a code. Any other name has no code, and neither has a number that comes to 0: variantkey() and regionkey() return NULL for it, so scaffolds and accessions have no key rather than a shared one. Use duckhts_contig_key() to join on contig names.
 
 ### Examples
 
@@ -2872,6 +3942,14 @@ Returns:
 VARCHAR
 ```
 
+### Use
+
+Readers and region arguments compare contig names byte for byte. This function is the explicit key for a join of two sources that spell contigs differently: join on duckhts_contig_key(a.chrom) = duckhts_contig_key(b.chrom), or rename one side. Two names of one source can share a key (1 and chr1), so a join on the key repeats rows when one side has both. duckhts_roh_ancestry and the R ancestry wrappers use this key. Functions with another rule state it under Contig names.
+
+### Not mapped
+
+Leading zeros (01 is not 1), numeric sex and mitochondrial codes (23, 24, 25, 26), accessions such as NC_000001.11, patches, alternate loci and unplaced scaffolds. The letter case of other names is kept.
+
 ### Examples
 
 ```sql
@@ -2960,20 +4038,24 @@ Returns:
 STRUCT
 ```
 
+### Contig names
+
+Input names and chain source names are compared after one rule: a leading chr is removed in any letter case; M, MT and 26 become MT; 23, 25, X, XY, XX, PAR1 and PAR2 become X; 24 and Y become Y. A lifted record carries the first name that the destination FASTA index has among: the chain's destination name; that name with chr added or removed; its form under the rule above, without and with chr; and for the mitochondrion MT, chrM and M. A FASTA that holds two of these names is not an error. A mitochondrial record that passes through without lifting takes the first of chrM, MT and M that the destination FASTA has.
+
 ### Examples
 
 ```sql
 SELECT (bcftools_liftover(chrom, pos, ref, alt, 'hg19ToHg38.over.chain.gz', 'hg38.fa', 'hg19.fa', 1, 250, false, NULL::BIGINT, false)).dest_pos FROM variants;
 ```
 
-## duckdb_liftover
+## duckhts_liftover
 
-DuckDB-specific wrapper over bcftools_liftover that takes either a table name or a derived-table expression plus column-name strings for chrom/pos/ref/alt and returns the lifted table. The no_left_align parameter mirrors --no-left-align in bcftools +liftover.
+Lift variants from a table or derived-table expression with bcftools_liftover.
 
 Signature:
 
 ```sql
-duckdb_liftover(table_name, chrom_col, pos_col, ref_col := NULL, alt_col := NULL, chain_path := NULL, dst_fasta_ref := NULL, src_fasta_ref := NULL, max_snp_gap := 1, max_indel_inc := 250, lift_mt := false, end_pos_col := NULL, no_left_align := false)
+duckhts_liftover(table_name, chrom_col, pos_col, ref_col := NULL, alt_col := NULL, chain_path := NULL, dst_fasta_ref := NULL, src_fasta_ref := NULL, max_snp_gap := 1, max_indel_inc := 250, lift_mt := false, end_pos_col := NULL, no_left_align := false)
 ```
 
 Returns:
@@ -2982,14 +4064,18 @@ Returns:
 table
 ```
 
+### Input
+
+Column-name strings select chrom/pos/ref/alt. The no_left_align parameter mirrors --no-left-align in bcftools +liftover.
+
 ### Examples
 
 ```sql
-SELECT * FROM duckdb_liftover('variants', 'chrom', 'pos', ref_col := 'ref', alt_col := 'alt', chain_path := 'hg19ToHg38.over.chain.gz', dst_fasta_ref := 'hg38.fa');
+SELECT * FROM duckhts_liftover('variants', 'chrom', 'pos', ref_col := 'ref', alt_col := 'alt', chain_path := 'hg19ToHg38.over.chain.gz', dst_fasta_ref := 'hg38.fa');
 ```
 
 ```sql
-SELECT * FROM duckdb_liftover('(SELECT chrom, pos, ref, alt FROM variants) AS v', 'chrom', 'pos', ref_col := 'ref', alt_col := 'alt', chain_path := 'hg19ToHg38.over.chain.gz', dst_fasta_ref := 'hg38.fa');
+SELECT * FROM duckhts_liftover('(SELECT chrom, pos, ref, alt FROM variants) AS v', 'chrom', 'pos', ref_col := 'ref', alt_col := 'alt', chain_path := 'hg19ToHg38.over.chain.gz', dst_fasta_ref := 'hg38.fa');
 ```
 
 ## bcftools_norm_row
@@ -3015,6 +4101,10 @@ alt accepts comma-delimited VARCHAR or VARCHAR[]. Symbolic `<DEL>` may use end_p
 ### Output
 
 Return pos_normed, end_pos_normed, ref_normed, alt_normed (always VARCHAR[]), nullable normed and norm_status. gVCF `<NON_REF>`/`<*>` reference blocks pass through with GVCFReferenceBlock. Mixed real/gVCF-symbolic rows normalize real alleles while preserving symbolic alleles and supplied reference-block END.
+
+### Contig names
+
+The reference sequence of a record is looked up in the FASTA index under, in order: the record's name; the name without chr (any letter case), or with chr added when it has none; and for M, MT or chrM also MT, chrM and M. The first name that the index has is used. A FASTA that holds both 1 and chr1 is not an error.
 
 ### Examples
 
@@ -3084,6 +4174,10 @@ With NULL second argument, summaries_list_file reads paths from a file or direct
 
 log_path writes per-PRS loaded/matched/allele-mismatch/duplicate-marker counts.
 
+### Contig names
+
+Chromosome names of the summary statistics are looked up in the genotype VCF header as the upstream plugin does, in this order: the exact name; the name without a lowercase chr prefix; chr plus a name of at most two characters; 23, 25, XY, XX, PAR1 and PAR2 as X or chrX; 24 as Y or chrY; 26, MT and chrM as MT or chrM. The lookup is case-sensitive, and M alone does not find MT. A marker whose chromosome is not found is skipped without an error.
+
 ### Examples
 
 ```sql
@@ -3114,20 +4208,24 @@ Returns:
 STRUCT
 ```
 
+### Contig names
+
+The reference sequence of a record is looked up in the FASTA index under, in order: the record's name; the name without chr (any letter case), or with chr added when it has none; and for M, MT or chrM also MT, chrM and M. The first name that the index has is used. A FASTA that holds both 1 and chr1 is not an error.
+
 ### Examples
 
 ```sql
 SELECT (bcftools_munge_row('chr1', 12345, 'A', 'G', 'rs1', 0.01, NULL, NULL, 0.12, 1000, NULL, NULL, NULL, 0.3, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'ref.fa')).ref;
 ```
 
-## duckdb_munge
+## duckhts_munge
 
-DuckDB macro wrapper over bcftools_munge_row that maps source columns (via preset or explicit map) and returns normalized GWAS-VCF-style rows with lean outputs and explicit `alleles_swapped` semantics. Output columns: chrom, pos, id, ref, alt, alleles_swapped, filter, ns, ez, nc, es, se, lp, af, ac, ne (16 columns). For METAL meta-analysis output with SI/I2/CQ/ED columns, use duckdb_munge_metal.
+Map source columns and normalize summary statistics with bcftools_munge_row.
 
 Signature:
 
 ```sql
-duckdb_munge(table_name, preset := '', column_map := map([''], ['']), column_map_file := '', fasta_ref := NULL, iffy_tag := 'IFFY', mismatch_tag := 'REF_MISMATCH', ns := NULL, nc := NULL, ne := NULL)
+duckhts_munge(table_name, preset := '', column_map := map([''], ['']), column_map_file := '', fasta_ref := NULL, iffy_tag := 'IFFY', mismatch_tag := 'REF_MISMATCH', ns := NULL, nc := NULL, ne := NULL)
 ```
 
 Returns:
@@ -3136,24 +4234,32 @@ Returns:
 table
 ```
 
+### Input
+
+Select columns via preset or explicit map to return normalized GWAS-VCF-style rows with explicit alleles_swapped semantics.
+
+### Output
+
+Output columns: chrom, pos, id, ref, alt, alleles_swapped, filter, ns, ez, nc, es, se, lp, af, ac, ne (16 columns). For METAL meta-analysis output with SI/I2/CQ/ED columns, use duckhts_munge_metal.
+
 ### Examples
 
 ```sql
-SELECT * FROM duckdb_munge('gwas_table', preset := 'PLINK', fasta_ref := 'ref.fa');
+SELECT * FROM duckhts_munge('gwas_table', preset := 'PLINK', fasta_ref := 'ref.fa');
 ```
 
 ```sql
-SELECT * FROM duckdb_munge('(SELECT * FROM gwas_table) AS s', column_map := map(['CHR','BP','A1','A2','SNP'], ['chrom','pos','ea','nea','id']), fasta_ref := 'ref.fa');
+SELECT * FROM duckhts_munge('(SELECT * FROM gwas_table) AS s', column_map := map(['CHR','BP','A1','A2','SNP'], ['chrom','pos','ea','nea','id']), fasta_ref := 'ref.fa');
 ```
 
-## duckdb_munge_metal
+## duckhts_munge_metal
 
-Extended munge macro with METAL meta-analysis output columns. Same as duckdb_munge but additionally emits: si (imputation info, from INFO input), i2 (Cochran's I² heterogeneity, from HET_I2), cq (Cochran's Q -log10 p, from HET_LP or -log10(HET_P)), and ed (effect direction string, from DIRE; +/- flipped on allele swap). The R wrapper rduckhts_munge() auto-dispatches to this macro when metal keys (INFO, HET_I2, HET_P, HET_LP, DIRE) are present in the resolved column map.
+Normalize summary statistics with additional METAL meta-analysis output columns.
 
 Signature:
 
 ```sql
-duckdb_munge_metal(table_name, preset := '', column_map := map([''], ['']), column_map_file := '', fasta_ref := NULL, iffy_tag := 'IFFY', mismatch_tag := 'REF_MISMATCH', ns := NULL, nc := NULL, ne := NULL)
+duckhts_munge_metal(table_name, preset := '', column_map := map([''], ['']), column_map_file := '', fasta_ref := NULL, iffy_tag := 'IFFY', mismatch_tag := 'REF_MISMATCH', ns := NULL, nc := NULL, ne := NULL)
 ```
 
 Returns:
@@ -3162,14 +4268,22 @@ Returns:
 table
 ```
 
+### Output
+
+Same as duckhts_munge but additionally emits: si (imputation info, from INFO input), i2 (Cochran's I² heterogeneity, from HET_I2), cq (Cochran's Q -log10 p, from HET_LP or -log10(HET_P)), and ed (effect direction string, from DIRE; +/- flipped on allele swap).
+
+### R wrapper
+
+rduckhts_munge() auto-dispatches to this macro when metal keys (INFO, HET_I2, HET_P, HET_LP, DIRE) are present in the resolved column map.
+
 ### Examples
 
 ```sql
-SELECT * FROM duckdb_munge_metal('metal_results', preset := 'METAL', fasta_ref := 'ref.fa');
+SELECT * FROM duckhts_munge_metal('metal_results', preset := 'METAL', fasta_ref := 'ref.fa');
 ```
 
 ```sql
-SELECT * FROM duckdb_munge_metal('meta', column_map := map(['CHR','BP','A1','A2','SNP','HET_I2','DIRE'], ['chr','pos','ea','nea','snp','HetISq','Direction']), fasta_ref := 'ref.fa');
+SELECT * FROM duckhts_munge_metal('meta', column_map := map(['CHR','BP','A1','A2','SNP','HET_I2','DIRE'], ['chr','pos','ea','nea','snp','HetISq','Direction']), fasta_ref := 'ref.fa');
 ```
 
 ## hts_union_query
@@ -3471,7 +4585,7 @@ Test whether a CIGAR string contains any soft-clipped segment (`S`). Overloaded 
 Signature:
 
 ```sql
-cigar_has_soft_clip(cigar)
+cigar_has_soft_clip(cigar[, strict])
 ```
 
 Returns:
@@ -3479,6 +4593,10 @@ Returns:
 ```
 BOOLEAN
 ```
+
+### Input validation
+
+See cigar_query_length for full-input validation and missing-input behavior.
 
 ### Examples
 
@@ -3493,7 +4611,7 @@ Test whether a CIGAR string contains any hard-clipped segment (`H`). Overloaded 
 Signature:
 
 ```sql
-cigar_has_hard_clip(cigar)
+cigar_has_hard_clip(cigar[, strict])
 ```
 
 Returns:
@@ -3501,6 +4619,10 @@ Returns:
 ```
 BOOLEAN
 ```
+
+### Input validation
+
+See cigar_query_length for full-input validation and missing-input behavior.
 
 ### Examples
 
@@ -3515,7 +4637,7 @@ Return the left-end soft-clipped length from a CIGAR string, or zero if the alig
 Signature:
 
 ```sql
-cigar_left_soft_clip(cigar)
+cigar_left_soft_clip(cigar[, strict])
 ```
 
 Returns:
@@ -3523,6 +4645,10 @@ Returns:
 ```
 BIGINT
 ```
+
+### Input validation
+
+See cigar_query_length for full-input validation and missing-input behavior. The literal first op determines the left soft clip; a leading H is not skipped.
 
 ### Examples
 
@@ -3537,7 +4663,7 @@ Return the right-end soft-clipped length from a CIGAR string, or zero if the ali
 Signature:
 
 ```sql
-cigar_right_soft_clip(cigar)
+cigar_right_soft_clip(cigar[, strict])
 ```
 
 Returns:
@@ -3545,6 +4671,10 @@ Returns:
 ```
 BIGINT
 ```
+
+### Input validation
+
+See cigar_query_length for full-input validation and missing-input behavior. The literal last op determines the right soft clip; a trailing H is not skipped.
 
 ### Examples
 
@@ -3559,7 +4689,7 @@ Return the query-consuming length from a CIGAR string, counting `M`, `I`, `S`, `
 Signature:
 
 ```sql
-cigar_query_length(cigar)
+cigar_query_length(cigar[, strict])
 ```
 
 Returns:
@@ -3568,10 +4698,22 @@ Returns:
 BIGINT
 ```
 
+### Input validation
+
+Text and packed CIGARs are validated in full. Supported ops are M, I, D, N, S, H, P, = and X, each with a positive length that fits BIGINT. Consumed query and reference spans must each fit BIGINT. Invalid ops, missing lengths, trailing digits, arithmetic overflow and NULL packed elements are invalid input. This validates operation syntax and numeric ranges, not biological ordering constraints.
+
+### Failure policy
+
+The optional final positional BOOLEAN strict defaults to FALSE: invalid input returns NULL. TRUE uses the same grammar but raises a DuckDB error naming the function and failure. Where an operation can be identified, diagnostics give its 1-based packed-op index or the 1-based byte at which the text operation starts. No read identifier is inferred. A top-level SQL NULL argument, including strict, returns NULL. Empty text, '*' and an empty packed list return NULL in either policy.
+
 ### Examples
 
 ```sql
 SELECT cigar_query_length('5S90M5I');
+```
+
+```sql
+SELECT cigar_query_length([84, 1440, 81]::UINTEGER[], TRUE);
 ```
 
 ## cigar_aligned_query_length
@@ -3581,7 +4723,7 @@ Return the aligned query length from a CIGAR string, counting `M`, `=`, and `X` 
 Signature:
 
 ```sql
-cigar_aligned_query_length(cigar)
+cigar_aligned_query_length(cigar[, strict])
 ```
 
 Returns:
@@ -3589,6 +4731,10 @@ Returns:
 ```
 BIGINT
 ```
+
+### Input validation
+
+See cigar_query_length for full-input validation and missing-input behavior.
 
 ### Examples
 
@@ -3603,7 +4749,7 @@ Return the reference-consuming length from a CIGAR string, counting `M`, `D`, `N
 Signature:
 
 ```sql
-cigar_reference_length(cigar)
+cigar_reference_length(cigar[, strict])
 ```
 
 Returns:
@@ -3611,6 +4757,10 @@ Returns:
 ```
 BIGINT
 ```
+
+### Input validation
+
+See cigar_query_length for full-input validation and missing-input behavior.
 
 ### Examples
 
@@ -3625,7 +4775,7 @@ Test whether a CIGAR string contains at least one instance of the requested oper
 Signature:
 
 ```sql
-cigar_has_op(cigar, op)
+cigar_has_op(cigar, op[, strict])
 ```
 
 Returns:
@@ -3634,10 +4784,56 @@ Returns:
 BOOLEAN
 ```
 
+### Input validation
+
+Uses the full-input validation of cigar_query_length, including the suffix after any matching op. The requested operator is one supported ASCII character, case-insensitive independently of the process locale.
+
+### Failure policy
+
+The optional final positional BOOLEAN strict defaults to FALSE: an invalid operator or malformed CIGAR returns NULL. TRUE raises an error with the diagnostic conventions of cigar_query_length. A top-level SQL NULL argument, including strict, returns NULL. Empty text, '*' and an empty packed list return false for a valid requested operator in either policy.
+
 ### Examples
 
 ```sql
 SELECT cigar_has_op('5S90M5S', 'S');
+```
+
+## cigar_aligned_blocks
+
+Return the aligned blocks of a CIGAR as a struct of three parallel BIGINT lists: ref_start, query_start and width, one entry per M, = or X op in CIGAR order. Overloaded to also accept a UINTEGER[] binary CIGAR (as produced by read_bam(cigar_representation := 'binary')); the binary overload is bit-identical to the text path.
+
+Signature:
+
+```sql
+cigar_aligned_blocks(cigar, pos[, strict])
+```
+
+Returns:
+
+```
+STRUCT
+```
+
+### Coordinates
+
+ref_start is pos plus the reference bases consumed before the block, so it carries whatever base pos uses; pass read_bam's 1-based POS for 1-based starts or 0 for offsets from the alignment start. query_start is the 0-based offset into the stored SEQ: soft clips count, hard clips do not. width is the op length. D and N advance the reference and split blocks, I advances the query and splits blocks, H and P consume nothing. Blocks are never merged, as in pysam get_blocks() and GenomicAlignments cigarRangesAlongReferenceSpace over M, = and X.
+
+### Input validation
+
+Uses the full-input CIGAR grammar of cigar_query_length. The half-open reference end, pos + cigar_reference_length(cigar), must also fit BIGINT. A negative pos is permitted. A valid CIGAR with no aligned op returns three empty lists.
+
+### Failure policy
+
+The optional final positional BOOLEAN strict defaults to FALSE: malformed CIGAR or coordinate overflow returns NULL. TRUE raises an error with the diagnostic conventions of cigar_query_length. A top-level SQL NULL argument, including pos or strict, returns NULL. Empty text, '*' and an empty packed list return NULL in either policy.
+
+### Examples
+
+```sql
+SELECT (cigar_aligned_blocks('5S90M5S', 100)).ref_start;
+```
+
+```sql
+SELECT UNNEST((b).ref_start) AS ref_start, UNNEST((b).width) AS width FROM (SELECT cigar_aligned_blocks(CIGAR, POS) AS b FROM read_bam('reads.bam', cigar_representation := 'binary'));
 ```
 
 ## is_paired

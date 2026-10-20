@@ -1,58 +1,7 @@
-#include "duckdb_extension.h"
-DUCKDB_EXTENSION_EXTERN
+#include "duckhts_somalier.h"
+#include "duckhts_registration.h"
 
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-static bool duckhts_somalier_register_vcf_sql(duckdb_connection connection,
-                                               const char *const *parts,
-                                               size_t part_count) {
-    duckdb_result result;
-    duckdb_state state;
-    size_t sql_size = 0;
-    size_t offset = 0;
-    char *sql;
-
-    for (size_t i = 0; i < part_count; i++) {
-        size_t part_size = strlen(parts[i]);
-        if (part_size > SIZE_MAX - sql_size - 1) {
-            fprintf(stderr, "[duckhts] failed Somalier VCF SQL registration: "
-                            "SQL text is too large\n");
-            return false;
-        }
-        sql_size += part_size;
-    }
-    sql = malloc(sql_size + 1);
-    if (!sql) {
-        fprintf(stderr, "[duckhts] failed Somalier VCF SQL registration: out of memory\n");
-        return false;
-    }
-    for (size_t i = 0; i < part_count; i++) {
-        size_t part_size = strlen(parts[i]);
-        memcpy(sql + offset, parts[i], part_size);
-        offset += part_size;
-    }
-    sql[offset] = '\0';
-
-    state = duckdb_query(connection, sql, &result);
-    free(sql);
-
-    if (state != DuckDBSuccess) {
-        const char *error = duckdb_result_error(&result);
-        if (error && *error) {
-            fprintf(stderr, "[duckhts] failed Somalier VCF SQL registration: %s\n", error);
-        }
-        duckdb_destroy_result(&result);
-        return false;
-    }
-    duckdb_destroy_result(&result);
-    return true;
-}
-
-bool register_duckhts_somalier_vcf_extract_sql(duckdb_connection connection) {
+bool register_duckhts_somalier_vcf_extract_sql(duckhts_registration_t *registration) {
     static const char *const sites_sql[] = {
         "CREATE OR REPLACE MACRO duckhts_somalier_import_sites("
         "path, assembly_name, max_sites := 1000000) AS TABLE "
@@ -72,10 +21,8 @@ bool register_duckhts_somalier_vcf_extract_sql(duckdb_connection connection) {
         "CAST(FILTER AS VARCHAR[]) AS source_filter, CAST(INFO_AF AS FLOAT[]) AS source_af "
         "FROM read_bcf(path, samples := '', scan_mode := 'sequential', "
         "decode_error_policy := 'error')"
-        "), __dht_autosomal AS MATERIALIZED ("
-        "SELECT * FROM __dht_source WHERE region NOT IN "
-        "('X', 'chrX', 'NC_000023.10', 'NC_000023.11', "
-        "'Y', 'chrY', 'NC_000024.9', 'NC_000024.10')"
+        "), __dht_autosomal AS NOT MATERIALIZED ("
+        "SELECT * FROM __dht_source",
         "), __dht_validation AS MATERIALIZED ("
         "SELECT CASE "
         "WHEN assembly_name IS NULL OR CAST(assembly_name AS VARCHAR) = '' "
@@ -88,7 +35,8 @@ bool register_duckhts_somalier_vcf_extract_sql(duckdb_connection connection) {
         "error('duckhts_somalier_import_sites: max_sites must be an integer in [1, 100000000]') "
         "WHEN (SELECT count(*) FROM __dht_source) > TRY_CAST(max_sites AS HUGEINT) THEN "
         "error('duckhts_somalier_import_sites: sites file exceeds max_sites') "
-        "WHEN count(*) = 0 THEN "
+        "WHEN count(*) FILTER (WHERE region IS NULL OR region NOT IN "
+        DUCKHTS_SOMALIER_SEX_REGIONS_SQL ") = 0 THEN "
         "error('duckhts_somalier_import_sites: sites file has no autosomal records') "
         "WHEN count(*) FILTER (WHERE region IS NULL OR region = '' "
         "OR octet_length(encode(region)) > 1024 OR position IS NULL OR position = 0) != 0 THEN "
@@ -106,7 +54,7 @@ bool register_duckhts_somalier_vcf_extract_sql(duckdb_connection connection) {
         "WHEN count(*) != count(DISTINCT struct_pack(region := region, pos1 := position)) THEN "
         "error('duckhts_somalier_import_sites: duplicate physical site') "
         "ELSE true END AS valid FROM __dht_autosomal"
-        "), __dht_oriented AS MATERIALIZED ("
+        "), __dht_oriented AS NOT MATERIALIZED ("
         "SELECT CAST(assembly_name AS VARCHAR) AS assembly, region, position, "
         "CASE WHEN source_ref < source_alt[1] THEN source_ref ELSE source_alt[1] END "
         "AS allele_a, "
@@ -118,10 +66,11 @@ bool register_duckhts_somalier_vcf_extract_sql(duckdb_connection connection) {
         "source_filter FROM __dht_autosomal CROSS JOIN __dht_header h "
         "CROSS JOIN __dht_validation v WHERE h.valid AND v.valid"
         ") SELECT assembly, "
-        "CAST(row_number() OVER (ORDER BY region, position) - 1 AS UBIGINT) AS site_index, "
+        "CAST(row_number() OVER (ORDER BY region IN "
+        DUCKHTS_SOMALIER_SEX_REGIONS_SQL ", region, position) - 1 AS UBIGINT) AS site_index, "
         "region, position, allele_a, allele_b, population_b_af, "
         "CAST(path AS VARCHAR) AS source_path, source_ref, source_alt, source_alt_af, source_filter "
-        "FROM __dht_oriented ORDER BY region, position"
+        "FROM __dht_oriented ORDER BY site_index"
     };
     static const char *const counts_sql[] = {
         "CREATE OR REPLACE MACRO duckhts_somalier_vcf_counts("
@@ -151,26 +100,35 @@ bool register_duckhts_somalier_vcf_extract_sql(duckdb_connection connection) {
         "), __dht_panel AS MATERIALIZED ("
         "SELECT p.* FROM __dht_panel_raw p CROSS JOIN __dht_ad_header h "
         "CROSS JOIN __dht_panel_identity i WHERE h.valid AND i.panel_sha256 IS NOT NULL",
-        "), __dht_source_records AS MATERIALIZED ("
+        "), __dht_source_records AS ("
         "SELECT record_index, CAST(CHROM AS VARCHAR) AS source_region, "
         "CAST(POS AS UBIGINT) AS source_position, CAST(REF AS VARCHAR) AS source_ref, "
         "CAST(ALT AS VARCHAR[]) AS source_alt, CAST(FILTER AS VARCHAR[]) AS source_filter, "
         "list_concat([CAST(REF AS VARCHAR)], CAST(ALT AS VARCHAR[])) AS source_alleles, "
         "calls FROM read_geno(path, samples := samples, scan_mode := 'sequential', "
         "decode_error_policy := 'error', format_fields := ['AD'], include_filter := true)"
+        "), __dht_matching_records AS MATERIALIZED ("
+        "SELECT source_region, source_position, count(*) AS source_record_count, "
+        "first(record_index) AS record_index, first(source_ref) AS source_ref, "
+        "first(source_alt) AS source_alt, first(source_filter) AS source_filter, "
+        "first(source_alleles) AS source_alleles, first(calls) AS calls "
+        "FROM __dht_source_records AS r "
+        "WHERE coalesce((r.source_region, r.source_position) IN ("
+        "SELECT (p.region, p.position) FROM __dht_panel AS p), false) "
+        "GROUP BY source_region, source_position"
         "), __dht_candidates AS MATERIALIZED ("
-        "SELECT p.*, r.record_index AS source_record_index, r.source_ref, r.source_alt, "
-        "r.source_filter, "
-        "r.source_alleles, r.calls, "
+        "SELECT p.*, r.record_index AS source_record_index, "
+        "r.source_record_count, r.source_ref, r.source_alt, "
+        "r.source_filter, r.source_alleles, r.calls, "
         "list_position(r.source_alleles, p.allele_a) - 1 AS source_allele_a_index, "
         "list_position(r.source_alleles, p.allele_b) - 1 AS source_allele_b_index, "
         "CASE WHEN r.record_index IS NULL THEN false ELSE "
-        "len(list_filter(r.source_alleles, a -> a = '*' OR regexp_matches(a, '^<.*>$') "
+        "len(list_filter(r.source_alleles, lambda a: a = '*' OR regexp_matches(a, '^<.*>$') "
         "OR strpos(a, '[') > 0 OR strpos(a, ']') > 0)) > 0 END AS symbolic_allele "
-        "FROM __dht_panel p LEFT JOIN __dht_source_records r "
+        "FROM __dht_panel AS p LEFT JOIN __dht_matching_records AS r "
         "ON r.source_region = p.region AND r.source_position = p.position"
         "), __dht_candidate_summary AS MATERIALIZED ("
-        "SELECT site_index, count(source_record_index) AS source_record_count, "
+        "SELECT site_index, coalesce(sum(source_record_count), 0) AS source_record_count, "
         "count(*) FILTER (WHERE source_record_index IS NOT NULL "
         "AND len(list_distinct(source_alleles)) != len(source_alleles)) "
         "AS duplicate_allele_records FROM __dht_candidates GROUP BY site_index"
@@ -187,7 +145,7 @@ bool register_duckhts_somalier_vcf_extract_sql(duckdb_connection connection) {
         "THEN CAST(call.format.AD AS INTEGER[]) ELSE NULL::INTEGER[] END AS ad, "
         "c.source_alleles, c.source_allele_a_index, c.source_allele_b_index, "
         "c.symbolic_allele FROM __dht_candidates c, unnest(c.calls) AS u(call) "
-        "WHERE c.source_record_index IS NOT NULL"
+        "WHERE c.source_record_index IS NOT NULL",
         "), __dht_ad_validation AS MATERIALIZED ("
         "SELECT CASE "
         "WHEN count(*) FILTER (WHERE ad IS NOT NULL "
@@ -195,16 +153,17 @@ bool register_duckhts_somalier_vcf_extract_sql(duckdb_connection connection) {
         "AND len(ad) != len(source_alleles)) != 0 THEN "
         "error('duckhts_somalier_vcf_counts: FORMAT/AD cardinality does not match REF plus ALT') "
         "WHEN count(*) FILTER (WHERE ad IS NOT NULL "
-        "AND len(list_filter(ad, value -> value < 0)) != 0) != 0 THEN "
+        "AND len(list_filter(ad, lambda value: value < 0)) != 0) != 0 THEN "
         "error('duckhts_somalier_vcf_counts: FORMAT/AD counts must be non-negative') "
         "ELSE true END AS valid FROM __dht_candidate_calls"
         "), __dht_filter_validation AS MATERIALIZED ("
         "SELECT CASE WHEN fp.filter_policy = 'error' AND count(*) FILTER ("
         "WHERE c.source_record_index IS NOT NULL AND c.source_filter IS NOT NULL "
-        "AND c.source_filter != ['PASS']) != 0 THEN "
+        "AND c.source_filter != ['PASS'] AND c.region NOT IN "
+        DUCKHTS_SOMALIER_SEX_REGIONS_SQL ") != 0 THEN "
         "error('duckhts_somalier_vcf_counts: a panel record has a failing FILTER') "
         "ELSE true END AS valid FROM __dht_candidates c CROSS JOIN __dht_filter_policy fp "
-        "GROUP BY fp.filter_policy"
+        "GROUP BY fp.filter_policy",
         "), __dht_samples AS MATERIALIZED ("
         "SELECT CAST(sample_index AS UINTEGER) AS sample_index, "
         "CAST(sample_name AS VARCHAR) AS sample_id "
@@ -224,23 +183,23 @@ bool register_duckhts_somalier_vcf_extract_sql(duckdb_connection connection) {
         "CASE WHEN source_record_index IS NULL OR symbolic_allele "
         "OR source_allele_a_index IS NULL OR source_allele_b_index IS NULL "
         "OR (filter_policy = 'pass_or_unapplied' AND source_filter IS NOT NULL "
-        "AND source_filter != ['PASS']) "
+        "AND source_filter != ['PASS'] AND region NOT IN " DUCKHTS_SOMALIER_SEX_REGIONS_SQL ") "
         "OR ad IS NULL OR (len(ad) = 1 AND ad[1] IS NULL) "
-        "OR len(list_filter(ad, value -> value IS NULL)) != 0 THEN NULL::UBIGINT "
+        "OR len(list_filter(ad, lambda value: value IS NULL)) != 0 THEN NULL::UBIGINT "
         "ELSE CAST(ad[source_allele_a_index + 1] AS UBIGINT) END AS a, "
         "CASE WHEN source_record_index IS NULL OR symbolic_allele "
         "OR source_allele_a_index IS NULL OR source_allele_b_index IS NULL "
         "OR (filter_policy = 'pass_or_unapplied' AND source_filter IS NOT NULL "
-        "AND source_filter != ['PASS']) "
+        "AND source_filter != ['PASS'] AND region NOT IN " DUCKHTS_SOMALIER_SEX_REGIONS_SQL ") "
         "OR ad IS NULL OR (len(ad) = 1 AND ad[1] IS NULL) "
-        "OR len(list_filter(ad, value -> value IS NULL)) != 0 THEN NULL::UBIGINT "
+        "OR len(list_filter(ad, lambda value: value IS NULL)) != 0 THEN NULL::UBIGINT "
         "ELSE CAST(ad[source_allele_b_index + 1] AS UBIGINT) END AS b, "
         "CASE WHEN source_record_index IS NULL OR symbolic_allele "
         "OR source_allele_a_index IS NULL OR source_allele_b_index IS NULL "
         "OR (filter_policy = 'pass_or_unapplied' AND source_filter IS NOT NULL "
-        "AND source_filter != ['PASS']) "
+        "AND source_filter != ['PASS'] AND region NOT IN " DUCKHTS_SOMALIER_SEX_REGIONS_SQL ") "
         "OR ad IS NULL OR (len(ad) = 1 AND ad[1] IS NULL) "
-        "OR len(list_filter(ad, value -> value IS NULL)) != 0 THEN NULL::UBIGINT "
+        "OR len(list_filter(ad, lambda value: value IS NULL)) != 0 THEN NULL::UBIGINT "
         "ELSE CAST(list_sum(ad) - ad[source_allele_a_index + 1] "
         "- ad[source_allele_b_index + 1] AS UBIGINT) END AS other, "
         "'vcf_bcf_format_ad'::VARCHAR AS source_method, "
@@ -248,13 +207,13 @@ bool register_duckhts_somalier_vcf_extract_sql(duckdb_connection connection) {
         "filter_policy AS \"filter_policy\", "
         "CASE WHEN source_record_index IS NULL THEN 'unavailable_no_record' "
         "WHEN filter_policy = 'pass_or_unapplied' AND source_filter IS NOT NULL "
-        "AND source_filter != ['PASS'] THEN 'unavailable_filtered' "
+        "AND source_filter != ['PASS'] AND region NOT IN " DUCKHTS_SOMALIER_SEX_REGIONS_SQL " THEN 'unavailable_filtered' "
         "WHEN symbolic_allele THEN 'unavailable_symbolic_allele' "
         "WHEN source_allele_a_index IS NULL OR source_allele_b_index IS NULL "
         "THEN 'unavailable_allele_mismatch' "
         "WHEN ad IS NULL THEN 'unavailable_ad_absent' "
         "WHEN (len(ad) = 1 AND ad[1] IS NULL) "
-        "OR len(list_filter(ad, value -> value IS NULL)) != 0 "
+        "OR len(list_filter(ad, lambda value: value IS NULL)) != 0 "
         "THEN 'unavailable_ad_missing' ELSE 'measured' END::VARCHAR AS status, "
         "source_record_index, sample_index AS source_sample_index, source_ref, source_alt, "
         "source_filter, "
@@ -265,10 +224,8 @@ bool register_duckhts_somalier_vcf_extract_sql(duckdb_connection connection) {
         "WHERE rv.valid AND av.valid AND fv.valid"
     };
 
-    if (!duckhts_somalier_register_vcf_sql(
-            connection, sites_sql, sizeof(sites_sql) / sizeof(sites_sql[0]))) {
-        return false;
-    }
-    return duckhts_somalier_register_vcf_sql(
-        connection, counts_sql, sizeof(counts_sql) / sizeof(counts_sql[0]));
+    return duckhts_register_sql_parts(
+               registration, sites_sql, sizeof(sites_sql) / sizeof(sites_sql[0])) &&
+           duckhts_register_sql_parts(
+               registration, counts_sql, sizeof(counts_sql) / sizeof(counts_sql[0]));
 }

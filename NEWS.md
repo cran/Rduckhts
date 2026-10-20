@@ -1,3 +1,539 @@
+# Rduckhts 2.0.0.0.1.9
+
+- New `rduckhts_depth_state_solutions()` and `rduckhts_depth_state_segments()`
+  fit the bundled ichorCNA-style copy-number state model to corrected bins
+  from `rduckhts_depth_bins()`: tumour fraction, ploidy and rank of every
+  start, and each solution's copy-number segments. Arguments are checked in R
+  before any query; `table_name` publishes the result as a table.
+
+# Rduckhts 2.0.0.0.1.8
+
+- The bundled `duckhts_somalier_bam_counts` reads its panel when the query is
+  bound, on the calling thread, instead of on a DuckDB worker thread. On
+  Windows, closing the private panel instance on a worker thread left a
+  DuckDB `thread_local` that the Rtools-built `duckdb` package destroys on
+  freed memory when the worker exits, which ended the R session with status
+  `0xC0000005` at `dbDisconnect(shutdown = TRUE)`, most often on Windows
+  Server 2022. `rduckhts_somalier_bam_counts()` and `rduckhts_ancestry_bam()`
+  are unchanged in behaviour.
+
+# Rduckhts 2.0.0.0.1.6
+
+- webR and r-universe builds compile the bundled extension against its bundled
+  htslib 1.24 headers even when toolchain include flags expose another htslib,
+  keeping the compiled declarations aligned with the linked static archive.
+
+# Rduckhts 2.0.0.0.1.5
+
+- Bundled regional depth fractions handle large-coordinate bin midpoints
+  without overflow or rounding. Sex-depth reference counts exclude samples
+  with no usable calibration level, correctly leave out the tested sample,
+  and reject NULL contigs instead of including them in the autosomal baseline.
+
+- Bundled insert-size metrics accept large finite deviation settings without
+  an integer overflow when computing the histogram cutoff.
+
+- The depth wrapper and bundled SQL reject `gc_step` below `1/2147483647`,
+  keeping GC stratum numbers within the integer output range.
+
+- The bundled depth correction centers on eligible autosomal bins with positive
+  reads. Samples with at least half their bins empty keep valid normalization;
+  empty bins retain zero ratios when their bin and stratum rules pass. Training
+  quantiles stay within the observed rate range, preserving constant-rate samples
+  when continuous-quantile interpolation rounds beyond that range.
+
+- `rduckhts_bam_insert_size_counts()` exposes native BAM/CRAM insert-size counts;
+  `rduckhts_bam_insert_size_counts_sql()` exposes the SQL composition, temporarily
+  setting and restoring DuckDB threads. Both arms remain available; native takes
+  the unsuffixed name by measurement in `benchmarks/benchmark_insert_size_counts.md`.
+  `duckhts_insert_size_metrics()` summarizes either counts relation in SQL.
+  Bundled wrapper fixtures retain BAM/CRAM and riker parity in 17 files (15.6 KB).
+  Semantics credit Fulcrum Genomics riker 0.4.1 (MIT), the executable oracle:
+  reject first-segment and QC-fail records, use POS + TLEN for the forward
+  read's mate end, and label equal strands `TANDEM`. These upstream rules
+  supersede the design note's draft rules. Picard is context only.
+
+- The bundled function catalog documents chr20 validation limits of the
+  low-pass mixture estimator, including weak small-share detection and
+  unvalidated genome-wide precision.
+
+- The bundled function catalog documents autosomal low-pass validation across
+  90 strata with 200 replicates each. At 5% share, positive interval limits
+  occur in 199–200/200 unrelated and 160–165/200 IBD1 replicates at 0.1x,
+  and 200/200 across tested relationships at 0.4x. Only 30/75 primary strata
+  meet every declared criterion, so a universal detection limit is not
+  established. The catalog also describes chr20 small-share validation limits.
+
+- The bundled low-pass mixture estimator uses exact binary sums
+  with fixed-size per-block accumulators and reproducible parallel results.
+  SQL validation and join memory is controlled by DuckDB, separately from
+  the native byte budget.
+
+- `rduckhts_depth_bins()`, `rduckhts_depth_region_fraction()` and
+  `rduckhts_depth_sex_fraction()` wrap the new depth macros: GC-corrected bin
+  ratios from bin counts, the share of cells with a one-copy change of each
+  named region, and the share of a second genome of the other sex from X and
+  Y depth, each estimator with an optional reference set. Empty bins do not
+  enter the outlier quantiles that select the training bins. The tests compare
+  every value with an independent base R implementation of the same formulas
+  and recover a planted gain and an XX/XY mixture.
+
+- `rduckhts_roh_counts(fit_table = ...)` reads the counts relation once.
+  A counts relation that held a join was kept in full in memory by DuckDB,
+  about three times the memory of the call without `fit_table` for 100
+  samples. The runs and the errors are unchanged.
+
+- `rduckhts_count_mixture_lowpass()` exposes the bundled extension's separate
+  conditional second-genome share estimator for low-pass counts. Error,
+  artefact and homozygosity calibration are required. Results include bounded
+  block-based limits, QC read/pair totals and an unresolved diagnostic for
+  matched-frequency relationship hypotheses. The default interval floor is
+  30 informative blocks; `min_blocks` supports small-fixture checks. Existing
+  count-error fit results are unchanged.
+
+- `rduckhts_count_error_fit()` returns `artefact_weight_sd` after
+  `artefact_weight`: the block interval of the artefact weight, formed as
+  `contamination_sd` is, and `NA` with fewer than three blocks. No other
+  value changes. `rduckhts_roh_counts(fit_table = ...)` needs an
+  `artefact_weight_sd` column in the fit relation (`NA` counts as 0) and
+  returns `stable_fraction` for each run: the share of the run's bases that
+  are also called when the artefact weight moves down and up by
+  `artefact_weight_sd`, and `gained_bases`: the bases that the higher weight
+  calls next to the run but outside every run. The other columns are unchanged, and the decode takes
+  about three times as long. Without `fit_table` the columns are unchanged.
+
+- `rduckhts_roh(site_rule = "bcftools", af_order = ...)` names a column of
+  `af_table` that gives the order of its lines, for example a line number.
+  Several rows may then share a position, and the row with the least value is
+  used, as `bcftools roh --AF-file` reads the first line of a position. A
+  `NULL` value, a value repeated within a position and a name that is not a
+  column are errors. `af_order` must be one nonempty string and needs
+  `site_rule = "bcftools"`.
+
+- `rduckhts_roh_counts()` gains `allele_balance = 0.5` and
+  `artefact_weight = 0`, the numbers that `rduckhts_count_error_fit()`
+  reports under these names: the share of a heterozygote's reads that show
+  the counted allele, and the chance that a site's counts are uniform on 0 to
+  depth whatever its genotype. With a positive `artefact_weight`, one site can
+  change the odds between the two states only by a bounded factor, as
+  `gt_error` does in `rduckhts_roh()`. The defaults give the previous runs
+  and qualities. Both are validated in R (`allele_balance` in [0.35, 0.65],
+  `artefact_weight` in [0, 0.05]); with `fit_table`, the two are read from the
+  fit relation, which must now hold `allele_balance` and `artefact_weight`
+  columns.
+
+- The README describes two known DuckDB 1.5.x issues that affect
+  `rduckhts_roh()`, `rduckhts_roh_counts()`, `rduckhts_count_error_fit()` and
+  `rduckhts_somalier_matched_contamination()` with `duckdb` 1.5.x: an
+  out-of-memory error can end the R session
+  (https://github.com/duckdb/duckdb/issues/26441), and a failed query with 5
+  or more threads can keep its native memory until the session ends
+  (https://github.com/duckdb/duckdb/issues/26871). The bundled function
+  catalog notes them for the same functions.
+
+- The bundled `read_bam()` decodes from a CRAM only the fields that the
+  selected columns need, with the same values. With decompression threads, a
+  query without SEQ, QUAL, CIGAR and tag columns no longer grows in memory with the
+  alignments read, and one without SEQ and QUAL loads no reference for a
+  slice that covers one reference. Tag columns with threads still grow
+  toward a bound, and SEQ or QUAL with threads still load the whole contig
+  reference; `decompression_threads := 0` avoids both. A table made by
+  `rduckhts_bam()` reads every column and is unchanged; queries on its
+  `bam_data` view gain the change.
+
+- The bundled readers leave out a MAP pair whose key is not valid UTF-8
+  (`attributes_map` of `rduckhts_gff()`, `rduckhts_gtf()` and
+  `rduckhts_genbank()`, `AUXILIARY_TAGS` of `rduckhts_bam()`, `key_values` of
+  `rduckhts_hts_header()`); such a key used to become a NULL MAP key. A value
+  that is not valid UTF-8 is still `NA`.
+
+- `rduckhts_roh(af_table = ..., site_rule = "bcftools")` uses the bundled
+  `duckhts_roh_af_table_bcftools` macro, which chooses the record of a repeated
+  listed position as `bcftools roh --AF-file` does: file order, indel class,
+  the next record's POS on any contig, the first claiming record, and its
+  alleles. It needs one `af_table` row per position and a sorted,
+  BGZF-compressed VCF or BCF. The default `"matching"` is unchanged. New
+  bundled fixtures `roh_repeated.vcf.gz` and `roh_repeated_af.tsv.gz` back the
+  tests.
+
+- `rduckhts_bcf(include_file_offset = TRUE)` and the bundled
+  `read_bcf(..., include_file_offset := true)` add a `FILE_OFFSET` column after
+  `FILTER`: the BGZF virtual position just after each record. Every scan mode
+  gives a record the same value, and ordering by it restores file order, also
+  among records at one position. Input that is not BGZF-compressed gives `NA`.
+  The default schema is unchanged. New bundled fixtures (`bcf_offset.bcf`,
+  `bcf_offset.vcf.gz`, `bcf_offset_plain.vcf` and the expected positions in
+  `bcf_record_ends.tsv`) back the tests.
+
+- Headers stored by the Parquet convert functions keep their line breaks; the
+  bundled `duckhts_raw_header_text()` joined lines with a literal backslash-n.
+
+- Added `rduckhts_bam_mate_overlap_counts()` and the bundled
+  `duckhts_bam_mate_overlap_counts()`: read 1 and read 2 of one fragment
+  compared where both mates align, counted by base quality and base. The
+  disagreement rate is about twice the instrument error rate, with no
+  reference, mask or contamination model. Alignments must be in coordinate
+  order, and `max_pending` bounds the mates held while they wait for their
+  mate.
+
+- `rduckhts_somalier_relatedness()` has a `max_pairs` argument (default
+  50,000,000): when it compares all pairs, a sketch relation with more pairs
+  is an error before any pair is compared. The bundled
+  `duckhts_somalier_relatedness_all_pairs()` now compares the pairs on
+  DuckDB's threads; the rows do not change with the thread count.
+
+- `rduckhts_count_error_fit()` evaluates the beta-binomial without the
+  rounding error that inflated the log-likelihood near the binomial limit, and
+  its optimizer checks the width of the whole simplex before it stops.
+
+- The bundled `duckhts_bam_mismatch_counts()` (and so
+  `rduckhts_bam_mismatch_counts()`) counts a read base written as `=` as a
+  match instead of leaving it out, and a VCF mask leaves out the last base of
+  an SVLEN deletion when a reference window starts there, as a BCF mask did.
+
+- Bundled ROH decoding uses two traceback bits per site, reducing per-thread
+  site workspace from 38 to approximately 36.25 bytes per site without changing
+  output values. Emissions and forward/posterior probabilities remain doubles.
+
+- The bundled GenBank reader reuses named qualifier values across a feature's
+  joined-location segments. The function reference documents all-NULL columns
+  for requested keys absent from every GenBank, GFF or GTF feature, with SQL
+  examples for asserting key presence.
+
+- `rduckhts_roh_counts(fit_table = ...)` uses each sample's fitted `seq_error` and
+  `contamination` through the bundled `duckhts_roh_counts_fitted` macro. A missing
+  fit, a NULL parameter or a duplicate fit row is an error; fit status filtering remains caller SQL,
+  and spreads and artefact weight do not enter the emission model.
+
+- Added `rduckhts_count_error_fit()` and the bundled
+  `duckhts_count_error_fit()`: read error, the share of reads of a second
+  genome, allele balance, spreads and an artefact weight fitted from allele
+  read counts at sites of known frequency, one row per sample, with an
+  interval from 10 Mb blocks and a second fit for a related second genome.
+
+- Added `rduckhts_bam_mismatch_counts()` and the bundled
+  `duckhts_bam_mismatch_counts()`: aligned read bases counted against the
+  reference by mate, cycle, base quality and substitution, with an optional
+  mask of known variants. With such a mask, the mismatches that remain are
+  mostly errors of the read, the library or the alignment, with the variants
+  that the mask does not hold, so their rate is an upper bound on the error
+  rate. Small fixtures
+  (`bam_mismatch.*`) are bundled for the example and the tests.
+
+- `rduckhts_ancestry_proportions()` compares chromosome names with
+  `duckhts_contig_key()`, the contig key of the extension, in place of a regular
+  expression and integer casts in SQL. `chrX` now matches `X`, `chrM` matches
+  `MT`, and the letter case of `chr` does not matter. A leading zero is now
+  another name for a text reference: `chr01` no longer matches `1`. A reference
+  with an integer chromosome column still compares numbers, for every DuckDB
+  integer type and for long references as for wide ones, and duplicates are
+  counted by the same key as the join, so `chr01` and `chr1` at one position
+  are duplicates for an integer reference instead of two variants. Names that
+  give no number, such as `X` and `Y`, join nothing for an integer reference
+  and are not duplicates of each other.
+
+- `rduckhts_bam_mismatch_counts()` stops with an error when a kept alignment
+  ends past the length of its contig in the reference, instead of leaving the
+  bases past the end out of the counts; the reference does not match the
+  alignment header in that case. For CRAM input, `reference_index_path` now
+  reaches the CRAM decoder too, so a FASTA index that is not next to the FASTA
+  is read and none is built beside it; the CRAM fixture (`bam_mismatch.cram`)
+  is bundled for that test.
+
+- The function reference states, under "Contig names", how each function
+  compares contig names across two sources, including the cases that return no
+  rows without an error.
+
+- SQL that joins `read_bam()`, `read_tabix()`, `read_gff()`, `read_gtf()` or
+  `read_bed()` plans better: the bundled extension now gives DuckDB a row
+  estimate for a whole-file indexed scan.
+
+- `rduckhts_bam()` and `read_bam()` return the right rows for the region items
+  `*` (reads without coordinates) and `.` (the whole file) when a BAM index has
+  no per-reference statistics, and for a BAM in which no read is placed. These
+  cases failed or returned no rows.
+
+- `rduckhts_bam()` and `read_bam()` with a `region` no longer walk every
+  reference of the index when the query is prepared; only a full-file scan
+  needs that work.
+
+- `rduckhts_bam()` and `read_bam()` no longer repeat rows when a BAI or CSI index
+  has alignments of a reference and no statistics for it (the statistics are
+  optional in both formats). A full-file scan with more than one thread could
+  return some records twice.
+
+- Reading an indexed CRAM with `rduckhts_bam()`, `rduckhts_hts_index()` or
+  `rduckhts_hts_index_spans()` no longer reads past the end of the CRAM index
+  object. Results are unchanged.
+
+- The documentation of `rduckhts_roh_counts()` states how its per-read `seq_error`
+  relates to the per-site `gt_error` of `rduckhts_roh()`: the read-count decode ends
+  a run at a heterozygous site that the genotype decode at `gt_error = 30` passes.
+
+- `rduckhts_somalier_relatedness()` is faster for all pairs, with the same rows: it
+  checks the contents of each sketch once instead of twice per pair. The bundled
+  extension adds `duckhts_somalier_relatedness_all_pairs()` for this.
+
+- The `max_site_bytes` argument of `rduckhts_roh()` and `rduckhts_roh_counts()` is
+  documented exactly: each call applies its own limit to the bytes held by all ROH
+  decodes in the process.
+
+- `rduckhts_roh()` accepts long ancestry reference and sample-proportion relations to calculate ancestry-weighted allele frequencies, with optional clamping.
+
+- Added `rduckhts_roh_counts()`: runs of homozygosity from a relation of allele read
+  counts (for example Somalier site counts from a BAM or CRAM), with a per-read
+  sequencing error and an optional contamination fraction (#318).
+
+- `rduckhts_roh()` and `rduckhts_roh_counts()` gain `max_sites` and `max_site_bytes`.
+  The bundled extension now holds the sites of each sample and chromosome in bounded
+  native buffers (16 bytes per site, 24 for read counts), and exceeding a limit is an
+  error (#329). Decoding many samples at once needs far less memory, and the runs are
+  unchanged.
+
+- An out-of-memory error during an ROH decode could abort the R session; the decode
+  no longer keeps its site lists in DuckDB aggregate state.
+
+- `rduckhts_roh_counts()` rejects fractional read counts, which were rounded, and
+  accepts a counts relation in any order. ROH arguments are checked even when the
+  input has no record.
+
+## Breaking changes
+
+- Direct SQL calls supplying `genetic_map` now use `duckhts_roh_map`,
+  `duckhts_roh_af_table_map`, `duckhts_roh_af_table_bcftools_map`,
+  `duckhts_roh_ancestry_map`, `duckhts_roh_counts_map`, or
+  `duckhts_roh_counts_fitted_map`; calls supplying `reference_table` use
+  `duckhts_depth_region_fraction_ref` or `duckhts_depth_sex_fraction_ref`;
+  labelled table-index builds use `duckhts_cgranges_from_table_labelled`.
+  These replace the corresponding extra-positional-argument calls under the
+  base names. R wrappers retain their signatures and select the SQL name internally.
+
+- Bundled private SQL helpers are renamed:
+  `duckdb_munge_preset_map` -> `duckhts__munge_preset_map`,
+  `duckdb_munge_resolved_map` -> `duckhts__munge_resolved_map`,
+  `duckhts_htslib_is_indel` -> `duckhts__htslib_is_indel`,
+  `duckhts_json_path_key` -> `duckhts__json_path_key`,
+  `duckhts_parquet_copy_sql` -> `duckhts__parquet_copy_sql`,
+  `duckhts_parquet_ident_list` -> `duckhts__parquet_ident_list`,
+  `duckhts_parquet_metadata_args` -> `duckhts__parquet_metadata_args`,
+  `duckhts_quote_ident` -> `duckhts__quote_ident`,
+  `duckhts_quote_string` -> `duckhts__quote_string`, and
+  `duckhts_raw_header_text` -> `duckhts__raw_header_text`.
+  R wrapper names and arguments are unchanged.
+
+- Bundled SQL macros `duckdb_liftover`, `duckdb_munge`, and `duckdb_munge_metal`
+  become `duckhts_liftover`, `duckhts_munge`, and `duckhts_munge_metal`,
+  respectively, without aliases; R wrapper names and arguments are unchanged.
+
+- Requires duckdb 1.5.0 or newer; loading the bundled extension on an older
+  DuckDB now fails. Its stable C API target (v1.2.0) is an ABI floor and does not
+  imply support for older DuckDB releases.
+
+- Consequence prediction has moved to DuckVEP and its R package, Rduckvep
+  (<https://github.com/RGenomicsETL/DuckVEP>). `rduckhts_haplotypes()` and the bundled
+  consequence fixtures are removed; the bundled extension no longer carries the DuckVEP
+  functions. Load DuckVEP with `Rduckvep::rduckvep_load(con)` on an Rduckhts connection
+  for annotation. CSQ, ANN and BCSQ parsing in `rduckhts_bcf()` is unchanged.
+
+- The bundled extension installs SQL macros into the database catalog only for a
+  writable in-memory default database. `rduckhts_connect()` and `rduckhts_load()`
+  instead install connection-local macros automatically for database files,
+  including read-only files, without modifying the file catalog. Use
+  `rduckhts_install_macros(con)` for other DBI or pool connections with the
+  extension loaded; it is idempotent and follows a caller transaction's rollback.
+
+- `duckhts_cgranges_from_query()` and `duckhts_cgranges_overlaps_bulk()`
+  are removed from the bundled extension. Use the table macro
+  `SELECT * FROM duckhts_cgranges_from_table(name, table_name, chrom_col,
+  start_col, end_col[, label_col])` over any table, view or TEMP table on your
+  connection, and `SELECT ..., unnest(duckhts_cgranges_overlaps_list(...))` for
+  bulk probing. The README examples use them.
+
+- `rduckhts_somalier_bam_counts()` and `rduckhts_ancestry_bam()` keep their
+  arguments, but the native reader now takes a local Parquet panel, so
+  `panel_table` is written to a scratch Parquet file for the call; temporary tables
+  and uncommitted rows are therefore accepted. Remote `panel_parquet` paths are no
+  longer read.
+
+- The Somalier panel now carries X/Y sites and its identity changes.
+  `rduckhts_somalier_import_sites()` keeps records on the Somalier v0.3.4 X/Y
+  aliases, numbered after every autosomal site, and the panel, frequency and
+  sketch digests differ from earlier versions even for autosomal-only panels, so
+  recompute persisted digests and sketches. Counts from
+  `rduckhts_somalier_vcf_counts()` and `rduckhts_somalier_bam_counts()` include
+  X/Y sites (which ignore `filter_policy`), while sketches, relatedness, CHARR
+  and matched contamination use only the autosomal sites, with unchanged
+  numeric results.
+
+## New features
+
+- New `rduckhts_roh()` finds runs of homozygosity in a VCF/BCF with the
+  `bcftools roh` model, returning `sample`, `chrom`, `start`, `end`, `length`,
+  `n_markers` and `quality`. Allele frequencies come from an INFO tag
+  (`af_tag`) or a table (`af_table`); `genetic_map` (a `chrom`, `pos`, `cm`
+  table), `rec_rate`, `hw_to_az`, `az_to_hw`, `gt_error` (GT-only emissions, no
+  FORMAT/PL needed) and `samples` are optional. Segments equal `bcftools roh`
+  on the bundled `roh_fixture.vcf.gz`; the native `duckhts_roh_segments()`
+  kernel is available from SQL. Start and end positions are identical; quality
+  matches the one decimal `bcftools` prints.
+
+- New `regions_var` argument on `rduckhts_geno()` and `rduckhts_bcf()` names a
+  session variable holding typed 0-based half-open intervals for
+  `read_geno(regions := ...)` / `read_bcf(regions := ...)`. The variable must
+  exist (an unknown name would otherwise mean an unrestricted scan).
+
+- New `rduckhts_geno_sites()` fetches full-site genotypes for requested
+  `(chrom, pos, ref, alt)` alleles from an indexed VCF/BCF on the caller
+  connection: it validates the requests, plans distinct positions with
+  `SET VARIABLE`, runs one `read_geno()` scan and joins exact alleles, returning
+  every request with `record_index`, `full_alt`, `alt_index`, `calls` (including
+  `GP`, `DS` or `HS` via `format_fields`) and a position-level `match_status`
+  (`matched`, `allele_not_at_site`, `ref_mismatch`, `absent`). Nothing is trimmed,
+  split, flipped or lifted over. Its session variable and temporary request
+  table are removed on exit, including after an error.
+
+- New `rduckhts_somalier_sex()` reports X/Y dosage evidence per sample: depth
+  relative to autosomal depth, usable X site and het/hom-alt counts, a Y
+  signal, and an XX, XY or ambiguous call with a status, following Somalier
+  v0.3.4. It is review evidence, not a diagnosis. `y_gate = "sample"` (default)
+  avoids the dependence of Somalier's Y check on the rest of the batch;
+  `"cohort"` reproduces it.
+
+- `rduckhts_somalier_find_sites()` selects canonical, provenance-bearing Somalier
+  panels from typed population relations, Parquet, or VCF/BCF with caller-visible
+  interval and allele exclusions. Interval relations use `chrom`, `start`, `end`,
+  so a view over `read_bed()` can be passed directly. Equal AF scores retain input
+  scan order and X/Y sites remain unspaced by default, matching Somalier v0.3.4. The
+  `tie_order = "lexical"` and `sex_spacing = "enforced"` options provide
+  deterministic lexical ties and X/Y minimum-distance spacing.
+
+- `rduckhts_ancestry_proportions()` estimates ancestry proportions from
+  allele-frequency or diploid-dosage relations against keyed wide or long reference
+  products, with matching audits and correlation gates on unrounded coefficients.
+  `reversed_variants` counts every site read as `1 - f`, including strand-flipped
+  reversals; `flipped_variants` counts every strand-flipped site.
+  Reference loci touching any input locus must be unique; matched loci need finite
+  loadings and frequencies in [0, 1]. Every sample returns a row for every reference
+  group, with NULL proportions and `no_matched_variants` when nothing matches. Group
+  identifiers round-trip exactly; wide references can map columns to identifiers with
+  `group_ids`. Missing genotypes are dropped.
+
+- `rduckhts_ancestry_geno()` takes dense `read_geno` call lists and requires the
+  declaration `non_reference_only = FALSE`; sparse call lists cannot supply zero
+  dosages.
+
+- `rduckhts_ancestry_bam()` counts reference-panel sites in indexed BAM/CRAM, using
+  allele-fraction or balance-rule genotype frequencies, and applies the same
+  proportion engine. `rduckhts_ancestry_panel()` selects biallelic unambiguous SNVs
+  with complete, valid reference values and forward-strand alleles, and publishes
+  the panel only after it validates. When more sites are eligible than `max_sites`,
+  every contig keeps at least one site (only the largest `max_sites` contigs when
+  there are more contigs than that) and the rest are shared in proportion to each
+  contig's eligible sites minus that one, spread evenly along it. Eligibility checks
+  keep constant state per locus, so building a panel from a full genome-wide reference
+  needs a fraction of the memory it did.
+
+- `rduckhts_genbank()` accepts `attributes` to expose qualifier keys as
+  VARCHAR columns that equal `attributes_map[key]`, computed only when
+  selected. Tests compare every named column with the map lookup on the bundled
+  phiX174 record and cover the rejected names.
+
+- `rduckhts_gff()` and `rduckhts_gtf()` accept `attributes` to create named
+  attribute columns. The bundled `read_gff` and `read_gtf` SQL readers also
+  support `attributes := ['key', ...]` with values matching `attributes_map`.
+
+- `rduckhts_bed()` accepts `error_policy` to skip short BED data lines or
+  include diagnostic rows with their physical line numbers and raw text in
+  the bundled extension. The default still raises an error.
+
+- The bundled CIGAR SQL functions accept an optional final `strict` BOOLEAN.
+  FALSE is the default; TRUE raises an error for invalid input under the
+  checked grammar. Errors name the function and the 1-based packed-op index or
+  text operation-start byte where available. SQL NULL arguments and no-CIGAR
+  sentinels retain their per-function outcomes.
+
+- Add `cigar_aligned_blocks(cigar, pos)`: extracts contiguous aligned segments
+  (M, =, X) from a CIGAR string or binary array into a STRUCT of parallel
+  lists (`ref_start`, `query_start`, `width`). Use it to convert alignments
+  into genomic intervals for coverage, junction, and range overlap analysis
+  without custom SQL loops.
+
+- The bundled Emscripten extension accepts read-only `blob:` URLs in webR. A
+  browser File can be exposed as an object URL, with a separate `index_path` URL
+  for region queries; callers must retain both URLs until queries finish.
+  Chromium 148.0.7778.96 worker XHR tests found HEAD fails with status 0, ranged
+  GET returns 206 with size in `Content-Range`, ranges crossing EOF are truncated,
+  and out-of-range or revoked URLs fail with status 0. Native builds are unchanged.
+  In webR, `blob:` URLs are exempt from `Module.duckhtsWasmHttpConfig`'s
+  `enforceHostAllowlist`, since they have no hostname and make no network request.
+
+## Fixes
+
+- A closed database file is released and can be reopened in the same R process
+  after cgranges or `rduckhts_somalier_bam_counts()` have been used; the bundled
+  extension no longer keeps connections into the loading database. This fixes
+  reopening on Windows. A tinytest closes and reopens a file database after
+  using both.
+
+- `rduckhts_somalier_vcf_counts()` streams the VCF into its panel join and keeps
+  call payloads only for panel coordinates, so peak memory follows the panel
+  rather than the VCF length. Counts, statuses and validation are unchanged.
+
+- The bundled DuckHTS extension loads on DuckDB 2.0; SQL lambdas use the
+  `lambda x:` syntax (DuckDB >= 1.3). It registers native functions before
+  dependent SQL macros and includes the underlying diagnostic in initialization
+  errors.
+
+- The bundled extension validates complete text and packed CIGARs with checked
+  lengths and consumed spans. CIGAR metrics and presence checks return NULL for
+  malformed suffixes or arithmetic outside BIGINT, including a bad suffix after
+  a matching operator. Unsupported requested operators return NULL in both forms.
+  Requested-operator case folding is ASCII and locale-independent. Full-input
+  checking adds validation work to operator-presence calls. `cigar_aligned_blocks`
+  grows text-output child lists geometrically, including for CIGARs with long
+  runs of leading zeroes, while decoding each text CIGAR once.
+
+- The bundled extension scans tabix, GFF3 and GTF fields once up to the last
+  projected field, including attributes when requested. Strict GFF3 validation
+  still counts the entire line; SQL results and diagnostics are unchanged.
+
+- The bundled `read_hts_header` reports a scan error if it cannot reserve or
+  size its parsed `key_values` MAP list.
+
+- Bundled bgzip, bgunzip, idxstats, and mosdepth outputs (including CSI indexes)
+  use exclusive creation when `overwrite = FALSE`; a failed operation does not
+  remove an output that the invocation did not open. On POSIX,
+  `overwrite = TRUE` replaces a symlink output entry with a new file without
+  writing through to its referent. On Windows, overwrite preserves the target of
+  a file symlink.
+
+- Table-reading wrappers preserve an existing table when `overwrite = TRUE`
+  fails validation or cannot read an input file, and table-creating wrappers
+  reject an existing table before resolving input files when `overwrite = FALSE`.
+
+- The bundled extension reports consistent Somalier CHARR count errors whether
+  public SQL validation or the native aggregate rejects the input first.
+
+- In webR, an explicit `blob:` `index_path` is no longer copied into the in-memory
+  filesystem and kept for the rest of the session, and an empty `blob:` File reads
+  as an empty input (zero rows), matching a zero-byte file natively, instead of
+  failing to open.
+
+## Documentation
+
+- The package is licensed GPL (>= 2) (previously declared GPL-3 while shipping an MIT
+  licence file); the bundled DuckHTS extension sources remain MIT, as listed in
+  `inst/COPYRIGHT`.
+
+- The bundled function catalog documents `bam_bin_counts(include_unmapped := FALSE)`
+  and its synthetic no-coordinate row, and names the type-probe macro's parameter as
+  registered (`candidate_type_name`). Package tests compare every catalog entry with
+  a registered overload of the loaded extension: kinds, scalar and aggregate
+  argument counts, native table options, and macro parameter names.
+
+- The package README footer shows contributor avatars and credits Ryan Ward /
+  Nurture Bio for GenBank support, with links to upstream acknowledgements.
+
 # Rduckhts 1.5.2-0.1.5
 
 This package bundles DuckHTS 1.5.2.
@@ -54,6 +590,22 @@ This package bundles DuckHTS 1.5.2.
 - The bundled estimators use stable high-depth CHARR tail evaluation and a
   full-grid matched search. Their documented numerical counterexamples can
   differ from Somalier v0.3.4 output; they are not bitwise CLI replicas.
+
+## GenBank annotations
+
+- Add `rduckhts_genbank()` for GenBank flat-file features in `rduckhts_gff()`'s
+  column shape, with an optional parsed qualifier `MAP`. `join()`/`order()`
+  locations give one row per segment in biological order with the CDS phase
+  carried across segments, `complement(...)` sets strand `-`, `Parent` links to
+  the gene sharing a `/locus_tag` in any file order, repeated qualifiers
+  comma-join, and the record-level `source` feature is dropped. Truncated or
+  malformed records, including a FEATURES table not followed by a sequence
+  section, are errors naming the feature and line.
+- Add `rduckhts_genbank_to_fasta()` to write each record's ORIGIN sequence as
+  FASTA under the same name reported as `seqname`. Bgzipped records are read in
+  place through htslib's hFILE layer. The output is renamed into place only
+  after a clean read, so an existing file is never lost. `output_path`,
+  `line_width` and `overwrite` are validated before any SQL runs.
 
 ## Genotypes and variant readers
 
